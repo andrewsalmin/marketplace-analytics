@@ -1,15 +1,22 @@
 import argparse
+from datetime import date
 from pathlib import Path
 
-from datetime import date
-
 from pyspark import StorageLevel
-from pyspark.sql import SparkSession, functions as F
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-
-VALID_ORDER_STATUSES = ["new", "paid", "shipped", "cancelled"]
-VALID_PAYMENT_STATUSES = ["success", "failed", "pending"]
+VALID_ORDER_STATUSES = [
+    "new",
+    "paid",
+    "shipped",
+    "delivered",
+    "cancelled",
+    "returned",
+    "refunded",
+]
+VALID_PAYMENT_STATUSES = ["pending", "success", "failed", "refunded", "chargeback"]
 
 
 def parse_args():

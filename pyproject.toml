@@ -1,0 +1,27 @@
+[project]
+name = "synthetic-ecommerce-data-generator"
+version = "3.0.0"
+description = "Synthetic clients/orders/payments CSV generator emulating a raw source-system export, with controlled DQ error injection."
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "faker>=20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
