@@ -46,6 +46,22 @@ def parse_args():
         required=True,
     )
 
+    parser.add_argument(
+        "--spark-clickhouse-connector",
+        default=(
+            "com.clickhouse.spark:clickhouse-spark-runtime-3.5_2.12:0.8.0,"
+            "com.clickhouse:clickhouse-jdbc:0.6.5:all"
+        ),
+        help=(
+            "Maven-координаты JAR'а коннектора ClickHouse для Spark "
+            "(через запятую, идёт в spark.jars.packages). Без него "
+            "SparkSession.builder упадёт с ClassNotFoundException на "
+            "com.clickhouse.spark.ClickHouseCatalog. Дефолт подобран под "
+            "pyspark 3.5 / Scala 2.12 — если версия успела устареть на "
+            "Maven Central, переопредели этим флагом, без правки кода."
+        ),
+    )
+
     args = parser.parse_args()
 
     try:
@@ -83,6 +99,12 @@ def main():
     spark = (
         SparkSession.builder
         .appName(f"clickhouse-load-{args.load_date}")
+        # Требует сетевого доступа к Maven Central (или настроенному
+        # зеркалу) в момент первого запуска — Spark/Ivy резолвит и
+        # кэширует JAR локально. Если удалённая машина без интернета,
+        # нужно заранее скачать JAR'ы и подключить через spark.jars с
+        # локальным путём вместо spark.jars.packages.
+        .config("spark.jars.packages", args.spark_clickhouse_connector)
         .config(
             "spark.sql.catalog.clickhouse",
             "com.clickhouse.spark.ClickHouseCatalog",
