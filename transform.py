@@ -11,12 +11,16 @@ VALID_ORDER_STATUSES = [
     "new",
     "paid",
     "shipped",
+    "ready_for_pickup",
     "delivered",
     "cancelled",
     "returned",
     "refunded",
 ]
-VALID_PAYMENT_STATUSES = ["pending", "success", "failed", "refunded", "chargeback"]
+# pending/chargeback убраны — синхронизировано с generate_data.py: обе
+# ветки были мёртвым кодом в генераторе, ни одна попытка оплаты их не
+# производит.
+VALID_PAYMENT_STATUSES = ["success", "failed", "refunded"]
 
 
 def parse_args():
@@ -194,7 +198,7 @@ def transform_clients(spark, raw_root, clean_root, quarantine_root, load_date):
 
     clients = clients.withColumn(
         "registration_date",
-        F.to_date("registration_date"),
+        F.to_timestamp("registration_date"),
     )
 
     duplicate_window = Window.partitionBy("client_id")
@@ -271,8 +275,15 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
 
     orders = (
         orders
-        .withColumn("order_date", F.to_date("order_date"))
+        .withColumn("created_at", F.to_timestamp("created_at"))
         .withColumn("amount_kopecks", F.col("amount_kopecks").cast("long"))
+        .withColumn("paid_at", F.to_timestamp("paid_at"))
+        .withColumn("shipped_at", F.to_timestamp("shipped_at"))
+        .withColumn("ready_for_pickup_at", F.to_timestamp("ready_for_pickup_at"))
+        .withColumn("delivered_at", F.to_timestamp("delivered_at"))
+        .withColumn("cancelled_at", F.to_timestamp("cancelled_at"))
+        .withColumn("returned_at", F.to_timestamp("returned_at"))
+        .withColumn("refunded_at", F.to_timestamp("refunded_at"))
     )
 
     clean_clients = spark.read.parquet(str(clean_root / "clients"))
@@ -290,6 +301,13 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
         how="left",
     )
 
+    # ORDER_ID_DUPLICATE_IN_HISTORY больше не проверяется: заказ теперь
+    # легитимно переиздаётся строкой с тем же order_id при каждом
+    # изменении статуса (upsert-модель, ReplacingMergeTree в ClickHouse
+    # сам разрешает версии по ingested_at) — повторный order_id в истории
+    # больше не ошибка. Дубликат В ПРЕДЕЛАХ ОДНОГО батча (duplicate_count)
+    # остаётся ошибкой — это по-прежнему один и тот же снапшот, две строки
+    # с одним order_id в нём означают DQ-проблему источника.
     duplicate_window = Window.partitionBy("order_id")
 
     orders = orders.withColumn(
@@ -297,27 +315,25 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
         F.count("*").over(duplicate_window),
     )
 
-    historical_order_keys = read_historical_keys(
-        spark=spark,
-        clean_root=clean_root,
-        entity="orders",
-        id_column="order_id",
-        load_date=load_date,
+    normalized_status = F.lower(F.trim(F.col("status")))
+
+    cancellation_reason_inconsistent = (
+        F.col("cancellation_reason").isNotNull()
+        & (~F.col("status").isin(["cancelled", "refunded"]))
+    ) | (
+        (F.col("status") == "cancelled")
+        & F.col("cancellation_reason").isNull()
     )
 
-    if historical_order_keys is not None:
-        orders = orders.join(
-            historical_order_keys,
-            on="order_id",
-            how="left",
-        )
-    else:
-        orders = orders.withColumn(
-            "exists_in_history",
-            F.lit(None).cast("boolean"),
-        )
-
-    normalized_status = F.lower(F.trim(F.col("status")))
+    refunded_before_cancelled = F.col("cancelled_at").isNotNull() & (
+        F.col("refunded_at") < F.col("cancelled_at")
+    )
+    refunded_before_returned = F.col("returned_at").isNotNull() & (
+        F.col("refunded_at") < F.col("returned_at")
+    )
+    refund_timeline_invalid = F.col("refunded_at").isNotNull() & (
+        refunded_before_cancelled | refunded_before_returned
+    )
 
     orders = add_dq_reason(
         orders,
@@ -332,10 +348,6 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
                 "ORDER_ID_DUPLICATE_IN_LOAD",
             ),
             (
-                F.col("exists_in_history").isNotNull(),
-                "ORDER_ID_DUPLICATE_IN_HISTORY",
-            ),
-            (
                 F.col("client_id").isNull() |
                 (F.trim(F.col("client_id")) == ""),
                 "CLIENT_ID_EMPTY",
@@ -345,8 +357,8 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
                 "CLIENT_NOT_FOUND",
             ),
             (
-                F.col("order_date").isNull(),
-                "ORDER_DATE_INVALID",
+                F.col("created_at").isNull(),
+                "CREATED_AT_INVALID",
             ),
             (
                 F.col("amount_kopecks").isNull() |
@@ -359,10 +371,17 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
                 (~normalized_status.isin(VALID_ORDER_STATUSES)),
                 "ORDER_STATUS_INVALID",
             ),
+            (
+                cancellation_reason_inconsistent,
+                "CANCELLATION_REASON_INCONSISTENT",
+            ),
+            (
+                refund_timeline_invalid,
+                "REFUND_TIMELINE_INVALID",
+            ),
         ],
     ).drop(
         "duplicate_count",
-        "exists_in_history",
         "client_exists",
     )
 
@@ -385,7 +404,7 @@ def transform_payments(spark, raw_root, clean_root, quarantine_root, load_date):
 
     payments = (
         payments
-        .withColumn("payment_date", F.to_date("payment_date"))
+        .withColumn("payment_date", F.to_timestamp("payment_date"))
         .withColumn("amount_kopecks", F.col("amount_kopecks").cast("long"))
     )
 
@@ -395,7 +414,7 @@ def transform_payments(spark, raw_root, clean_root, quarantine_root, load_date):
         clean_orders
         .select(
             "order_id",
-            F.col("order_date").alias("related_order_date"),
+            F.col("created_at").alias("related_order_created_at"),
         )
         .dropDuplicates(["order_id"])
         .withColumn("order_exists", F.lit(True))
@@ -407,32 +426,16 @@ def transform_payments(spark, raw_root, clean_root, quarantine_root, load_date):
         how="left",
     )
 
+    # PAYMENT_ID_DUPLICATE_IN_HISTORY больше не проверяется: платёж,
+    # ставший refunded, легитимно переиздаётся с тем же payment_id
+    # (pay_{order_id}), сформированным детерминированно из order_id —
+    # это тот же upsert-паттерн, что и у orders.
     duplicate_window = Window.partitionBy("payment_id")
 
     payments = payments.withColumn(
         "duplicate_count",
         F.count("*").over(duplicate_window),
     )
-
-    historical_payment_keys = read_historical_keys(
-        spark=spark,
-        clean_root=clean_root,
-        entity="payments",
-        id_column="payment_id",
-        load_date=load_date,
-    )
-
-    if historical_payment_keys is not None:
-        payments = payments.join(
-            historical_payment_keys,
-            on="payment_id",
-            how="left",
-        )
-    else:
-        payments = payments.withColumn(
-            "exists_in_history",
-            F.lit(None).cast("boolean"),
-        )
 
     normalized_status = F.lower(F.trim(F.col("status")))
 
@@ -447,10 +450,6 @@ def transform_payments(spark, raw_root, clean_root, quarantine_root, load_date):
             (
                 F.col("duplicate_count") > 1,
                 "PAYMENT_ID_DUPLICATE_IN_LOAD",
-            ),
-            (
-                F.col("exists_in_history").isNotNull(),
-                "PAYMENT_ID_DUPLICATE_IN_HISTORY",
             ),
             (
                 F.col("order_id").isNull() |
@@ -479,15 +478,14 @@ def transform_payments(spark, raw_root, clean_root, quarantine_root, load_date):
             (
                 F.col("order_exists").isNotNull() &
                 F.col("payment_date").isNotNull() &
-                (F.col("payment_date") < F.col("related_order_date")),
+                (F.col("payment_date") < F.col("related_order_created_at")),
                 "PAYMENT_BEFORE_ORDER",
             ),
         ],
     ).drop(
         "duplicate_count",
-        "exists_in_history",
         "order_exists",
-        "related_order_date",
+        "related_order_created_at",
     )
 
     valid_df, invalid_df = split_valid_invalid(payments)
