@@ -306,6 +306,23 @@ def ensure_batch_does_not_exist(source_root: Path, load_date: date) -> None:
         )
 
 
+def _concat_frames(frames: list[pd.DataFrame], columns: list[str]) -> pd.DataFrame:
+    """
+    Обычный `pd.concat` на пустых/all-NA фреймах эмитит FutureWarning в
+    текущих версиях pandas (правила определения итогового dtype при
+    конкатенации с пустыми фреймами скоро изменятся) — отфильтровываем
+    пустые фреймы заранее, а не полагаемся на нынешнее (устаревающее)
+    поведение. На первом батче (нет ни истории, ни текущих данных)
+    пустые фреймы — обычное дело, не исключение.
+    """
+    non_empty = [df for df in frames if not df.empty]
+
+    if not non_empty:
+        return pd.DataFrame(columns=columns)
+
+    return pd.concat(non_empty, ignore_index=True)
+
+
 def _realistic_timestamps(days: list[date], rng: np.random.Generator) -> list[datetime]:
     """Реалистичное время суток (взвешено по HOUR_WEIGHTS) для каждого дня в `days`."""
     n = len(days)
@@ -403,7 +420,7 @@ def load_existing_clients(source_root: Path, load_date: date) -> pd.DataFrame:
         df = pd.read_csv(file, parse_dates=["registration_date"])
         frames.append(df)
 
-    clients = pd.concat(frames, ignore_index=True)
+    clients = _concat_frames(frames, CLIENT_COLUMNS)
     clients["registration_date"] = pd.to_datetime(clients["registration_date"])
 
     clients = clients[
@@ -451,7 +468,7 @@ def load_existing_orders(
     if not frames:
         return pd.DataFrame(columns=ORDER_COLUMNS)
 
-    combined = pd.concat(frames, ignore_index=True)
+    combined = _concat_frames(frames, [*ORDER_COLUMNS, "_source_load_date"])
     combined = combined.sort_values("_source_load_date", kind="stable")
     combined = combined.drop_duplicates("order_id", keep="last")
     combined = combined.drop(columns=["_source_load_date"])
@@ -1151,9 +1168,9 @@ def main() -> None:
         else None,
     )
 
-    all_clients_df = pd.concat(
+    all_clients_df = _concat_frames(
         [existing_clients_df, new_clients_df],
-        ignore_index=True,
+        CLIENT_COLUMNS,
     ).drop_duplicates("client_id")
 
     new_orders_df, orders_dq = generate_orders(
@@ -1167,9 +1184,9 @@ def main() -> None:
     lookback_days = compute_lookback_days(args)
     historical_open_df = load_existing_orders(source_root, load_date, lookback_days)
 
-    candidate_pool_df = pd.concat(
+    candidate_pool_df = _concat_frames(
         [new_orders_df, historical_open_df],
-        ignore_index=True,
+        ORDER_COLUMNS,
     )
 
     advanced_df, refund_payments_df, state_machine_dq = advance_open_orders(
@@ -1211,13 +1228,13 @@ def main() -> None:
         ~new_orders_df["order_id"].isin(touched_ids)
     ]
 
-    orders_to_write_df = pd.concat(
+    orders_to_write_df = _concat_frames(
         [untouched_new_orders_df, advanced_df, paid_orders_df],
-        ignore_index=True,
+        ORDER_COLUMNS,
     )
-    payments_to_write_df = pd.concat(
+    payments_to_write_df = _concat_frames(
         [payments_df, refund_payments_df],
-        ignore_index=True,
+        PAYMENT_COLUMNS,
     )
 
     all_dq = {**clients_dq, **orders_dq, **state_machine_dq, **payments_dq}
