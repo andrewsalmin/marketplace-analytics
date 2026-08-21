@@ -25,7 +25,7 @@ python generate_data.py \
   --data-dir ./data \
   --clients-count 100 \
   --orders-count 15000 \
-  --payments-count 16000 \
+  --payments-count 15150 \
   --error-rate 0.01 \
   --payment-deadline-hours 24 \
   --shipping-deadline-hours 48 \

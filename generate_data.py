@@ -171,7 +171,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--clients-count", type=int, default=100)
     parser.add_argument("--orders-count", type=int, default=15_000)
-    parser.add_argument("--payments-count", type=int, default=16_000)
+    # Запас над --orders-count (по умолчанию 15000) подобран эмпирически:
+    # ~1% оставляет реалистичную долю заказов (~1-2%), не оплаченных в
+    # срок (status=cancelled, reason=not_paid_in_time) — без запаса
+    # вообще этот тип отмены практически никогда бы не встречался в
+    # данных, с большим запасом (5%+) он тоже почти обнуляется.
+    parser.add_argument("--payments-count", type=int, default=15_150)
     parser.add_argument("--error-rate", type=float, default=0.01)
 
     parser.add_argument("--payment-deadline-hours", type=int, default=24)
