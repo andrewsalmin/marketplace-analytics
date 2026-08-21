@@ -920,30 +920,36 @@ def generate_payments(
     orders = new_status_orders_df.drop_duplicates("order_id").set_index(
         "order_id", drop=False
     )
-    order_ids = orders.index.tolist()
 
     day_start = datetime.combine(load_date, time.min)
 
-    chosen_order_ids = rng.choice(order_ids, size=count)
     payment_methods = rng.choice(PAYMENT_METHODS, size=count)
     success_rolls = rng.random(count)
 
     rows: list[dict[str, Any]] = []
     paid_orders: dict[str, dict[str, Any]] = {}
-    resolved: set[str] = set()
 
-    # Сэмплирование с возвращением технически может выбрать один и тот же
-    # order_id несколько раз за прогон. Обрабатываем попытки
-    # последовательно и как только заказ попадает в `resolved` —
-    # дальнейшие попытки на него просто пропускаются (строка не
-    # генерируется вовсе), иначе получили бы несколько success-платежей
-    # на один заказ, что ломает инвариант "не более одного успешного
-    # платежа на заказ".
+    # Пул заказов, ещё не оплаченных в ЭТОМ батче — сжимается по мере
+    # успешных оплат (swap-to-end + pop, O(1) на удаление), а не просто
+    # фильтруется постфактум. Раньше `count` попыток сэмплировались
+    # ОДНИМ rng.choice(order_ids, size=count) из фиксированного списка, и
+    # попытки, случайно попавшие на уже оплаченный заказ, просто
+    # выбрасывались вхолостую — при сэмплировании с возвращением и
+    # скромном запасе --payments-count над --orders-count это по чистой
+    # комбинаторике ("coupon collector") оставляло значительную долю
+    # заказов вообще без единой попытки (эмпирически ~35% при дефолтных
+    # 16000 попыток на 15000 заказов). Реальное удаление из пула убирает
+    # эту потерю — каждая попытка либо решает ещё не оплаченный заказ,
+    # либо тратится на легитимный повторный ретрай после отказа.
+    pool = list(orders.index)
+    pool_position = {order_id: i for i, order_id in enumerate(pool)}
+
     for i in range(count):
-        order_id = str(chosen_order_ids[i])
+        if not pool:
+            break  # все заказы в пуле уже оплачены — обслуживать больше некого
 
-        if order_id in resolved:
-            continue
+        idx = int(rng.integers(0, len(pool)))
+        order_id = pool[idx]
 
         order = orders.loc[order_id]
         created_at = order["created_at"]
@@ -955,10 +961,14 @@ def generate_payments(
             latest = earliest + timedelta(seconds=1)
 
         attempt_at = _uniform_between(earliest, latest, rng)
+        payment_method = str(payment_methods[i])
 
         if success_rolls[i] < PAYMENT_SUCCESS_RATE:
-            resolved.add(order_id)
-            payment_method = str(payment_methods[i])
+            last = pool.pop()
+            if idx < len(pool):
+                pool[idx] = last
+                pool_position[last] = idx
+            del pool_position[order_id]
 
             updated = dict(order)
             updated["status"] = "paid"
@@ -969,7 +979,6 @@ def generate_payments(
             payment_status = "success"
             payment_id = f"pay_{order_id}"
         else:
-            payment_method = str(payment_methods[i])
             payment_status = "failed"
             payment_id = f"pay_{load_date:%Y%m%d}_{i + 1:08d}"
 
