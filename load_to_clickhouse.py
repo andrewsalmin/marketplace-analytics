@@ -49,16 +49,26 @@ def parse_args():
     parser.add_argument(
         "--spark-clickhouse-connector",
         default=(
-            "com.clickhouse.spark:clickhouse-spark-runtime-3.5_2.12:0.8.0,"
-            "com.clickhouse:clickhouse-jdbc:0.6.5:all"
+            "com.clickhouse.spark:clickhouse-spark-runtime-3.5_2.12:0.10.0,"
+            "com.clickhouse:clickhouse-jdbc:0.10.0,"
+            "org.apache.httpcomponents.client5:httpclient5:5.3.1"
         ),
         help=(
-            "Maven-координаты JAR'а коннектора ClickHouse для Spark "
-            "(через запятую, идёт в spark.jars.packages). Без него "
-            "SparkSession.builder упадёт с ClassNotFoundException на "
-            "com.clickhouse.spark.ClickHouseCatalog. Дефолт подобран под "
-            "pyspark 3.5 / Scala 2.12 — если версия успела устареть на "
-            "Maven Central, переопредели этим флагом, без правки кода."
+            "Maven-координаты JAR'ов для Spark (через запятую, идёт в "
+            "spark.jars.packages — этот механизм поддерживает только "
+            "3-частный формат groupId:artifactId:version, БЕЗ classifier "
+            "вроде ':all'). httpclient5 добавлен явно — без него "
+            "clickhouse-jdbc молча откатывается на встроенный Java "
+            "HttpURLConnection, который может не пережить чуть нестандартный "
+            "HTTP-ответ ClickHouse (споткнулись именно на этом на практике). "
+            "Версии connector/jdbc — 0.10.0, сверено с maven-metadata.xml "
+            "на Maven Central на момент отладки (мои изначальные версии по "
+            "памяти оказались устаревшими и давали рассинхрон по LZ4-сжатию "
+            "с ClickHouse 26.7). Без connector/jdbc SparkSession.builder "
+            "упадёт с ClassNotFoundException на "
+            "com.clickhouse.spark.ClickHouseCatalog. Если и эта версия "
+            "успела устареть на Maven Central, переопредели этим флагом, "
+            "без правки кода."
         ),
     )
 
