@@ -1,2 +1,4 @@
 -r requirements.txt
-pyspark>=3.5
+# <4.0: Spark 4.x bundles Scala 2.13, incompatible with the Scala
+# 2.12-only clickhouse-spark-runtime-3.5_2.12 connector JAR.
+pyspark>=3.5,<4.0
