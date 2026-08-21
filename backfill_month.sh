@@ -4,12 +4,21 @@
 # раскрутка), дальше плато с лёгким органическим ростом (устоявшийся
 # маркетплейс). Подставь свою форму кривой при необходимости.
 #
-# Использование: ./backfill_month.sh
+# Использование:
+#   ./backfill_month.sh          # с самого начала
+#   ./backfill_month.sh 26       # возобновить с дня 26 (1-indexed) —
+#                                 # например, после падения посреди
+#                                 # прогона (диск, сеть и т.п.). День,
+#                                 # на котором упало, не публикуется
+#                                 # (publish_batch не успевает
+#                                 # отработать), так что его нужно
+#                                 # повторить, а не пропускать.
 set -euo pipefail
 
 DATA_DIR="./data"
 START_DATE="2026-06-01"
 DAYS=82  # 1 июня - 21 августа включительно
+RESUME_FROM_DAY="${1:-1}"  # 1-indexed, как в выводе "(день N/82)"
 
 RAMP_DAYS=27  # первые ~4 недели — фаза роста, дальше — плато
 
@@ -32,6 +41,12 @@ ERROR_RATE=0.01
 PAYMENTS_MARGIN_PCT=101
 
 for i in $(seq 0 $((DAYS - 1))); do
+  day_number=$((i + 1))
+
+  if [ "$day_number" -lt "$RESUME_FROM_DAY" ]; then
+    continue  # уже опубликован в предыдущем прогоне, пропускаем
+  fi
+
   load_date=$(date -d "${START_DATE} + ${i} days" +%F)
 
   # Фаза 1 (i <= RAMP_DAYS, июнь): линейный рост от мягкого запуска.
@@ -49,7 +64,7 @@ for i in $(seq 0 $((DAYS - 1))); do
   fi
   payments_count=$((orders_count * PAYMENTS_MARGIN_PCT / 100))
 
-  echo "=== ${load_date} (день $((i + 1))/${DAYS}): clients=${clients_count} orders=${orders_count} payments=${payments_count} ==="
+  echo "=== ${load_date} (день ${day_number}/${DAYS}): clients=${clients_count} orders=${orders_count} payments=${payments_count} ==="
 
   python generate_data.py \
     --load-date "${load_date}" \
