@@ -663,6 +663,7 @@ def generate_clients(
     rng: np.random.Generator,
     error_rate: float = 0.0,
     existing_client_ids: list[str] | None = None,
+    launch_date: date | None = None,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     if count == 0:
         return pd.DataFrame(columns=CLIENT_COLUMNS), {}
@@ -675,6 +676,13 @@ def generate_clients(
 
     offsets = rng.integers(0, 365, size=count)
     registration_days = [load_date - timedelta(days=int(d)) for d in offsets]
+
+    # Без launch_date клиент может "регистрироваться" сколь угодно давно
+    # относительно load_date — при бэкфилле с launch_date это нереалистично:
+    # маркетплейс физически не мог иметь клиентов до дня открытия.
+    if launch_date is not None:
+        registration_days = [max(d, launch_date) for d in registration_days]
+
     registration_dates = _realistic_timestamps(registration_days, rng)
     city_weights = np.array(CITY_WEIGHTS, dtype=float)
     city_weights = city_weights / city_weights.sum()
@@ -1354,6 +1362,7 @@ def main() -> None:
         existing_client_ids=existing_clients_df["client_id"].dropna().tolist()
         if not existing_clients_df.empty
         else None,
+        launch_date=launch_date,
     )
 
     all_clients_df = _concat_frames(
