@@ -77,6 +77,19 @@ ACQUISITION_CHANNELS = [
     "email",
 ]  # google_ads не используется — недоступен в РФ с 2022
 
+# Реалистичные доли клиентов по каналам привлечения (в сумме 1.0),
+# вместо равновероятного выбора — иначе распределение на дашборде
+# получается плоским, чего не бывает в реальном маркетинг-миксе.
+ACQUISITION_CHANNEL_WEIGHTS = [
+    0.35,  # organic
+    0.22,  # yandex_direct
+    0.10,  # vk_ads
+    0.07,  # telegram_ads
+    0.13,  # social
+    0.10,  # referral
+    0.03,  # email
+]
+
 PAYMENT_METHODS = ["card", "sbp", "mir_pay", "cash"]
 # apple_pay/google_pay не используются — NFC-платежи недоступны в РФ
 # с 2022, mir_pay — реальная российская NFC-альтернатива
@@ -640,7 +653,7 @@ def generate_clients(
     registration_days = [load_date - timedelta(days=int(d)) for d in offsets]
     registration_dates = _realistic_timestamps(registration_days, rng)
     cities = rng.choice(CITIES, size=count)
-    channels = rng.choice(ACQUISITION_CHANNELS, size=count)
+    channels = rng.choice(ACQUISITION_CHANNELS, size=count, p=ACQUISITION_CHANNEL_WEIGHTS)
     emails = [fake.unique.email() for _ in range(count)]
 
     client_ids = [f"cl_{load_date:%Y%m%d}_{i + 1:08d}" for i in range(count)]
