@@ -208,6 +208,85 @@ commit-маркера нет — партиция не готова (или пу
 `commit.json -> skipped_quality_issue_types`, вместо того чтобы
 молча ничего не инжектировать.
 
+### Типы DQ-ошибок (`dq_reason`)
+
+Слой quarantine размечает каждую забракованную строку значением
+`dq_reason` — кодом причины (или несколькими, если строка нарушает
+сразу несколько правил: они склеиваются через `" | "`, см.
+`add_dq_reason` в `transform.py`). Это **не то же самое**, что
+идентификаторы инжектированных ошибок из `--error-rate`
+(`orders.null_client_id` и т. п., см. выше) — те описывают, что было
+испорчено на этапе генерации сырых данных, а `dq_reason` — что именно
+поймала валидация в `transform.py`. Однозначного 1:1 соответствия
+между ними нет: часть причин ниже возникает только как побочный
+эффект (например, `CLIENT_NOT_FOUND` — не прямая инжекция, а
+следствие того, что связанный клиент сам оказался в карантине).
+
+Каждый код ниже отмечен стандартным измерением DQ, которое он
+проверяет:
+- **Completeness** (полнота) — обязательное поле пустое/NULL
+- **Uniqueness** (уникальность) — недопустимый дубликат
+- **Validity** (валидность) — значение вне допустимого домена/формата
+- **Consistency** (согласованность) — противоречие между полями
+  одной записи, либо между записями разных сущностей (включая
+  ссылочную целостность и порядок событий во времени)
+
+**`clients`:**
+- `CLIENT_ID_EMPTY` (Completeness) — `client_id` пустой или NULL
+- `CLIENT_ID_DUPLICATE_IN_LOAD` (Uniqueness) — `client_id`
+  повторяется внутри одного батча
+- `CLIENT_ID_DUPLICATE_IN_HISTORY` (Uniqueness) — `client_id` уже
+  встречался в ранее загруженных батчах
+- `REGISTRATION_DATE_INVALID` (Validity) — `registration_date` не
+  распарсился/NULL
+
+**`orders`:**
+- `ORDER_ID_EMPTY` (Completeness) — `order_id` пустой или NULL
+- `ORDER_ID_DUPLICATE_IN_LOAD` (Uniqueness) — `order_id` повторяется
+  внутри одного батча (легитимное переиздание заказа в разных
+  батчах ошибкой не считается, см. «Клиенты и заказы накапливаются
+  между запусками» выше)
+- `CLIENT_ID_EMPTY` (Completeness) — у заказа не указан `client_id`
+- `CLIENT_NOT_FOUND` (Consistency) — `client_id` указан, но такого
+  клиента нет в clean-слое `clients`
+- `CREATED_AT_INVALID` (Validity) — `created_at` не распарсился/NULL
+- `ORDER_AMOUNT_INVALID` (Validity) — `amount_kopecks` NULL или ≤ 0
+- `ORDER_STATUS_INVALID` (Validity) — `status` вне списка
+  `VALID_ORDER_STATUSES`
+- `CANCELLATION_REASON_INCONSISTENT` (Consistency) —
+  `cancellation_reason` заполнен при статусе, отличном от
+  `cancelled`/`refunded`, либо статус `cancelled`, а причина не
+  заполнена
+- `REFUND_TIMELINE_INVALID` (Consistency) — `refunded_at` раньше
+  `cancelled_at` или `returned_at`
+
+**`payments`:**
+- `PAYMENT_ID_EMPTY` (Completeness) — `payment_id` пустой или NULL
+- `PAYMENT_ID_DUPLICATE_IN_LOAD` (Uniqueness) — `payment_id`
+  повторяется внутри одного батча
+- `ORDER_ID_EMPTY` (Completeness) — у платежа не указан `order_id`
+- `ORDER_NOT_FOUND` (Consistency) — `order_id` указан, но такого
+  заказа нет в clean-слое `orders`
+- `PAYMENT_DATE_INVALID` (Validity) — `payment_date` не
+  распарсился/NULL
+- `PAYMENT_AMOUNT_INVALID` (Validity) — `amount_kopecks` NULL или ≤ 0
+- `PAYMENT_STATUS_INVALID` (Validity) — `status` вне списка
+  `VALID_PAYMENT_STATUSES`
+- `PAYMENT_BEFORE_ORDER` (Consistency) — `payment_date` раньше
+  `created_at` связанного заказа
+
+Заметь: измерение **Timeliness** (своевременность/свежесть данных) в
+этом списке не представлено — задержка между событием и его
+появлением в выгрузке существует и задокументирована («Батч —
+календарный день, не час» в «Известные ограничения»), но не
+размечается как `dq_reason`: пайплайн трактует её как ожидаемое
+свойство батчевой модели, а не как DQ-нарушение.
+
+Единственный источник истины — сами проверки в `add_dq_reason(...)`
+внутри `transform_clients`/`transform_orders`/`transform_payments`
+(`transform.py`); список выше синхронизирован с ними на момент
+написания.
+
 ### Реалистичная динамика error_rate (`--launch-date`)
 
 По умолчанию `--error-rate` — буквальный процент брака в каждом
@@ -240,66 +319,6 @@ commit-маркера нет — партиция не готова (или пу
 `commit.json -> effective_error_rate` (наряду с буквальным
 `configured_error_rate`). `backfill_month.sh` включает эту динамику,
 передавая `--launch-date` равным дате открытия площадки.
-
-### Типы DQ-ошибок (`dq_reason`)
-
-Слой quarantine размечает каждую забракованную строку значением
-`dq_reason` — кодом причины (или несколькими, если строка нарушает
-сразу несколько правил: они склеиваются через `" | "`, см.
-`add_dq_reason` в `transform.py`). Это **не то же самое**, что
-идентификаторы инжектированных ошибок из `--error-rate`
-(`orders.null_client_id` и т. п., см. выше) — те описывают, что было
-испорчено на этапе генерации сырых данных, а `dq_reason` — что именно
-поймала валидация в `transform.py`. Однозначного 1:1 соответствия
-между ними нет: часть причин ниже возникает только как побочный
-эффект (например, `CLIENT_NOT_FOUND` — не прямая инжекция, а
-следствие того, что связанный клиент сам оказался в карантине).
-
-**`clients`:**
-- `CLIENT_ID_EMPTY` — `client_id` пустой или NULL
-- `CLIENT_ID_DUPLICATE_IN_LOAD` — `client_id` повторяется внутри
-  одного батча
-- `CLIENT_ID_DUPLICATE_IN_HISTORY` — `client_id` уже встречался в
-  ранее загруженных батчах
-- `REGISTRATION_DATE_INVALID` — `registration_date` не
-  распарсился/NULL
-
-**`orders`:**
-- `ORDER_ID_EMPTY` — `order_id` пустой или NULL
-- `ORDER_ID_DUPLICATE_IN_LOAD` — `order_id` повторяется внутри одного
-  батча (легитимное переиздание заказа в разных батчах ошибкой не
-  считается, см. «Клиенты и заказы накапливаются между запусками»
-  выше)
-- `CLIENT_ID_EMPTY` — у заказа не указан `client_id`
-- `CLIENT_NOT_FOUND` — `client_id` указан, но такого клиента нет в
-  clean-слое `clients`
-- `CREATED_AT_INVALID` — `created_at` не распарсился/NULL
-- `ORDER_AMOUNT_INVALID` — `amount_kopecks` NULL или ≤ 0
-- `ORDER_STATUS_INVALID` — `status` вне списка `VALID_ORDER_STATUSES`
-- `CANCELLATION_REASON_INCONSISTENT` — `cancellation_reason` заполнен
-  при статусе, отличном от `cancelled`/`refunded`, либо статус
-  `cancelled`, а причина не заполнена
-- `REFUND_TIMELINE_INVALID` — `refunded_at` раньше `cancelled_at`
-  или `returned_at`
-
-**`payments`:**
-- `PAYMENT_ID_EMPTY` — `payment_id` пустой или NULL
-- `PAYMENT_ID_DUPLICATE_IN_LOAD` — `payment_id` повторяется внутри
-  одного батча
-- `ORDER_ID_EMPTY` — у платежа не указан `order_id`
-- `ORDER_NOT_FOUND` — `order_id` указан, но такого заказа нет в
-  clean-слое `orders`
-- `PAYMENT_DATE_INVALID` — `payment_date` не распарсился/NULL
-- `PAYMENT_AMOUNT_INVALID` — `amount_kopecks` NULL или ≤ 0
-- `PAYMENT_STATUS_INVALID` — `status` вне списка
-  `VALID_PAYMENT_STATUSES`
-- `PAYMENT_BEFORE_ORDER` — `payment_date` раньше `created_at`
-  связанного заказа
-
-Единственный источник истины — сами проверки в `add_dq_reason(...)`
-внутри `transform_clients`/`transform_orders`/`transform_payments`
-(`transform.py`); список выше синхронизирован с ними на момент
-написания.
 
 ### State machine заказа
 
