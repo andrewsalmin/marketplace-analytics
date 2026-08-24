@@ -49,6 +49,76 @@ python generate_data.py \
 заказы, не закрытые в один прогон (не оплаченные, не отправленные и
 т.д.), будут подхватываться и продвигаться в следующих.
 
+## Полный прогон: от генерации до ClickHouse
+
+Разовый запуск `generate_data.py` выше — только для знакомства с
+генератором. Чтобы прогнать весь пайплайн (source → raw →
+clean/quarantine → ClickHouse) на реалистичной истории (рампа + плато,
+см. `backfill_month.sh`), нужны все слои по очереди.
+
+**1. Зависимости**
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-spark.txt   # для transform.py и load_to_clickhouse.py
+```
+
+**2. Поднять ClickHouse**
+
+Схема (`clickhouse_schema.sql`) применяется автоматически при первом
+же запуске `load_to_clickhouse.py` (`ensure_schema()`) — руками её
+создавать не нужно, нужен только сам сервер:
+
+```bash
+export CLICKHOUSE_PASSWORD=<придумай-пароль>
+docker compose up -d clickhouse
+```
+
+Поднимает `clickhouse/clickhouse-server` с пользователем
+`analytics_user`/`$CLICKHOUSE_PASSWORD` и базой `analytics` (HTTP —
+`localhost:8123`, native-протокол для `clickhouse-client` —
+`localhost:9000`). См. `docker-compose.yml`.
+
+**3. Сгенерировать историю (source-слой)**
+
+```bash
+./backfill_month.sh
+```
+
+82 дня (2026-06-01 → 2026-08-21), рампа 27 дней + плато. Форма кривой
+и диапазон дат — константы в начале скрипта, меняются на месте. При
+сбое посреди прогона — `./backfill_month.sh <день>` (см. комментарий
+в шапке скрипта).
+
+**4. Прогнать вниз по пайплайну (raw → clean/quarantine → ClickHouse)**
+
+```bash
+./run_downstream_pipeline.sh "$CLICKHOUSE_PASSWORD"
+```
+
+Для каждого дня: `ingest_csv_to_raw.py` → `transform.py` →
+`load_to_clickhouse.py`. Загрузка в ClickHouse идемпотентна (см.
+«Идемпотентная загрузка в ClickHouse» ниже) — скрипт безопасно
+перезапускать, уже загруженные дни просто пропускаются.
+
+**Перезагрузить один конкретный день** (например, если подозреваешь
+задвоение из-за более раннего сбоя коннектора):
+
+```bash
+python load_to_clickhouse.py \
+  --load-date 2026-07-28 \
+  --clickhouse-password "$CLICKHOUSE_PASSWORD" \
+  --force-reload
+```
+
+**Проверить, что реально загружено:**
+
+```bash
+docker exec -it analytics-clickhouse clickhouse-client \
+  --user analytics_user --password "$CLICKHOUSE_PASSWORD" \
+  --query "SELECT load_date, entity, rows, loaded_at FROM analytics._load_commits ORDER BY load_date"
+```
+
 ## Архитектура
 
 ### Партиционирование и layout на диске
@@ -181,6 +251,31 @@ SELECT status, count() FROM orders FINAL GROUP BY status
 (`created_at`, `client_id`, `order_id`) в момент запроса, а не ждать
 фонового мерджа. Альтернатива — `argMax(status, ingested_at)` с
 группировкой по `order_id`, если `FINAL` неприемлем по перформансу.
+
+### Идемпотентная загрузка в ClickHouse
+
+Схема таблиц закоммичена в `clickhouse_schema.sql` (единственный
+источник истины — раньше таблицы существовали только в живом
+кластере). `load_to_clickhouse.py` применяет её (`CREATE ... IF NOT
+EXISTS`) при каждом запуске, поэтому отдельного шага миграции не
+требуется.
+
+`write_clickhouse()` делает голый `.append()` — сам по себе он не
+защищён от повторной загрузки одного и того же `load_date` (например,
+при повторном запуске после сбоя коннектора). Идемпотентность
+обеспечивается снаружи, тем же принципом, что commit-маркер в
+`generate_data.py`:
+
+- перед загрузкой `load_to_clickhouse.py` проверяет таблицу
+  `_load_commits` — если `load_date` там уже есть, скрипт ничего не
+  грузит и завершается (no-op), не поднимая даже `SparkSession`;
+- `--force-reload` перезаписывает день: сначала `ALTER TABLE ... DROP
+  PARTITION` по всем таблицам, партиционированным по `load_date`
+  (метаданная операция, не мутация — быстро, без write amplification),
+  потом обычная загрузка;
+- запись в `_load_commits` — последний шаг, после того как все
+  сущности успешно догружены. Если скрипт упадёт раньше — маркер не
+  запишется, и следующий запуск честно догрузит день заново.
 
 ## Универсальность архитектуры
 

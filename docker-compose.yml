@@ -1,0 +1,25 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: analytics-clickhouse
+    ports:
+      - "8123:8123" # HTTP-интерфейс — то, чем пользуется load_to_clickhouse.py
+      - "9000:9000" # native-протокол — для clickhouse-client
+    environment:
+      # Обязателен явно — без значения по умолчанию, чтобы пароль не
+      # осел в этом файле. Задай перед запуском:
+      #   export CLICKHOUSE_PASSWORD=...   (bash/zsh)
+      #   $env:CLICKHOUSE_PASSWORD = "..." (PowerShell)
+      # либо положи в .env рядом с этим файлом (.env — в .gitignore).
+      CLICKHOUSE_USER: analytics_user
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD before starting}
+      CLICKHOUSE_DB: analytics
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+volumes:
+  clickhouse_data:
