@@ -67,6 +67,30 @@ CITIES = [
     "Волгоград",
 ]  # города-миллионники России
 
+# Грубые относительные доли клиентов по городам (население + онлайн-
+# платёжеспособный спрос) — без них rng.choice брал бы города
+# равновероятно, что нереалистично: Москва и СПб непропорционально
+# доминируют в e-commerce РФ. Не обязаны суммироваться в 1.0 —
+# нормализуются в generate_clients().
+CITY_WEIGHTS = [
+    0.30,   # Москва
+    0.14,   # Санкт-Петербург
+    0.055,  # Новосибирск
+    0.05,   # Екатеринбург
+    0.045,  # Казань
+    0.04,   # Нижний Новгород
+    0.035,  # Челябинск
+    0.035,  # Красноярск
+    0.035,  # Самара
+    0.035,  # Уфа
+    0.035,  # Ростов-на-Дону
+    0.03,   # Омск
+    0.03,   # Краснодар
+    0.025,  # Воронеж
+    0.025,  # Пермь
+    0.025,  # Волгоград
+]
+
 ACQUISITION_CHANNELS = [
     "organic",
     "yandex_direct",
@@ -652,7 +676,9 @@ def generate_clients(
     offsets = rng.integers(0, 365, size=count)
     registration_days = [load_date - timedelta(days=int(d)) for d in offsets]
     registration_dates = _realistic_timestamps(registration_days, rng)
-    cities = rng.choice(CITIES, size=count)
+    city_weights = np.array(CITY_WEIGHTS, dtype=float)
+    city_weights = city_weights / city_weights.sum()
+    cities = rng.choice(CITIES, size=count, p=city_weights)
     channels = rng.choice(ACQUISITION_CHANNELS, size=count, p=ACQUISITION_CHANNEL_WEIGHTS)
     emails = [fake.unique.email() for _ in range(count)]
 
