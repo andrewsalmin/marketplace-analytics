@@ -85,10 +85,14 @@ docker compose up -d clickhouse
 ./backfill_month.sh
 ```
 
-82 дня (2026-06-01 → 2026-08-21), рампа 27 дней + плато. Форма кривой
-и диапазон дат — константы в начале скрипта, меняются на месте. При
-сбое посреди прогона — `./backfill_month.sh <день>` (см. комментарий
-в шапке скрипта).
+82 дня (2026-06-01 → 2026-08-21), рампа объёма 27 дней + плато. Форма
+кривой и диапазон дат — константы в начале скрипта, меняются на месте.
+При сбое посреди прогона — `./backfill_month.sh <день>` (см.
+комментарий в шапке скрипта).
+
+Помимо объёма, скрипт передаёт `--launch-date`, включающую отдельную
+(более быструю, 21 день) динамику `error_rate` — см. «Реалистичная
+динамика error_rate» ниже.
 
 **4. Прогнать вниз по пайплайну (raw → clean/quarantine → ClickHouse)**
 
@@ -203,6 +207,99 @@ commit-маркера нет — партиция не готова (или пу
 этом в логах и фиксирует пропущенные типы в
 `commit.json -> skipped_quality_issue_types`, вместо того чтобы
 молча ничего не инжектировать.
+
+### Реалистичная динамика error_rate (`--launch-date`)
+
+По умолчанию `--error-rate` — буквальный процент брака в каждом
+батче, постоянный изо дня в день. Это не похоже на реальный DQ-дашборд:
+там процент ошибок обычно выше сразу после запуска источника/интеграции
+(баги ещё не отловлены) и снижается по мере взросления, поверх — день-в-
+день шум и редкие инциденты у отдельных источников (сорвался
+партнёрский API, деплой с багом и т.п.).
+
+Флаг `--launch-date` включает эту динамику (`resolve_error_rate()` в
+`generate_data.py`) поверх `--error-rate`, который в этом режиме
+становится **базовым уровнем плато**, а не буквальным дневным
+значением:
+
+- **Ramp-up** (`_ramp_multiplier`) — в день запуска эффективный
+  `error_rate` в `RAMP_ERROR_INITIAL_MULTIPLIER` (4×) выше базового,
+  экспоненциально затухает к нему за `RAMP_ERROR_DECAY_DAYS` (21 день).
+- **Шум** — логнормальный день-в-день джиттер (`ERROR_RATE_NOISE_SIGMA`)
+  вокруг тренда, отдельно для каждой сущности.
+- **Инциденты** (`_build_incident_calendar` / `_incident_multiplier`) —
+  редкие 2–4-дневные всплески (×3–6) у случайной сущности. Календарь
+  строится на фиксированном сиде, не зависящем от `--load-date`, поэтому
+  каждый отдельный дневной запуск генератора детерминированно видит
+  один и тот же календарь и корректно попадает в многодневные окна без
+  persisted state между запусками.
+
+Без `--launch-date` ничего из этого не действует — `error_rate`
+передаётся как есть (обратная совместимость). Фактически применённое
+значение по каждой сущности за день фиксируется в
+`commit.json -> effective_error_rate` (наряду с буквальным
+`configured_error_rate`). `backfill_month.sh` включает эту динамику,
+передавая `--launch-date` равным дате открытия площадки.
+
+### Типы DQ-ошибок (`dq_reason`)
+
+Слой quarantine размечает каждую забракованную строку значением
+`dq_reason` — кодом причины (или несколькими, если строка нарушает
+сразу несколько правил: они склеиваются через `" | "`, см.
+`add_dq_reason` в `transform.py`). Это **не то же самое**, что
+идентификаторы инжектированных ошибок из `--error-rate`
+(`orders.null_client_id` и т. п., см. выше) — те описывают, что было
+испорчено на этапе генерации сырых данных, а `dq_reason` — что именно
+поймала валидация в `transform.py`. Однозначного 1:1 соответствия
+между ними нет: часть причин ниже возникает только как побочный
+эффект (например, `CLIENT_NOT_FOUND` — не прямая инжекция, а
+следствие того, что связанный клиент сам оказался в карантине).
+
+**`clients`:**
+- `CLIENT_ID_EMPTY` — `client_id` пустой или NULL
+- `CLIENT_ID_DUPLICATE_IN_LOAD` — `client_id` повторяется внутри
+  одного батча
+- `CLIENT_ID_DUPLICATE_IN_HISTORY` — `client_id` уже встречался в
+  ранее загруженных батчах
+- `REGISTRATION_DATE_INVALID` — `registration_date` не
+  распарсился/NULL
+
+**`orders`:**
+- `ORDER_ID_EMPTY` — `order_id` пустой или NULL
+- `ORDER_ID_DUPLICATE_IN_LOAD` — `order_id` повторяется внутри одного
+  батча (легитимное переиздание заказа в разных батчах ошибкой не
+  считается, см. «Клиенты и заказы накапливаются между запусками»
+  выше)
+- `CLIENT_ID_EMPTY` — у заказа не указан `client_id`
+- `CLIENT_NOT_FOUND` — `client_id` указан, но такого клиента нет в
+  clean-слое `clients`
+- `CREATED_AT_INVALID` — `created_at` не распарсился/NULL
+- `ORDER_AMOUNT_INVALID` — `amount_kopecks` NULL или ≤ 0
+- `ORDER_STATUS_INVALID` — `status` вне списка `VALID_ORDER_STATUSES`
+- `CANCELLATION_REASON_INCONSISTENT` — `cancellation_reason` заполнен
+  при статусе, отличном от `cancelled`/`refunded`, либо статус
+  `cancelled`, а причина не заполнена
+- `REFUND_TIMELINE_INVALID` — `refunded_at` раньше `cancelled_at`
+  или `returned_at`
+
+**`payments`:**
+- `PAYMENT_ID_EMPTY` — `payment_id` пустой или NULL
+- `PAYMENT_ID_DUPLICATE_IN_LOAD` — `payment_id` повторяется внутри
+  одного батча
+- `ORDER_ID_EMPTY` — у платежа не указан `order_id`
+- `ORDER_NOT_FOUND` — `order_id` указан, но такого заказа нет в
+  clean-слое `orders`
+- `PAYMENT_DATE_INVALID` — `payment_date` не распарсился/NULL
+- `PAYMENT_AMOUNT_INVALID` — `amount_kopecks` NULL или ≤ 0
+- `PAYMENT_STATUS_INVALID` — `status` вне списка
+  `VALID_PAYMENT_STATUSES`
+- `PAYMENT_BEFORE_ORDER` — `payment_date` раньше `created_at`
+  связанного заказа
+
+Единственный источник истины — сами проверки в `add_dq_reason(...)`
+внутри `transform_clients`/`transform_orders`/`transform_payments`
+(`transform.py`); список выше синхронизирован с ними на момент
+написания.
 
 ### State machine заказа
 

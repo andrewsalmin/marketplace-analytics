@@ -4,6 +4,14 @@
 # раскрутка), дальше плато с лёгким органическим ростом (устоявшийся
 # маркетплейс). Подставь свою форму кривой при необходимости.
 #
+# --launch-date включает в generate_data.py реалистичную динамику
+# error_rate (resolve_error_rate()): в первые недели после открытия она
+# заметно выше ERROR_RATE ниже (интеграции ещё сырые) и экспоненциально
+# сглаживается к нему, поверх — день-в-день шум и редкие инциденты
+# (сорвался партнёрский API и т.п.) у отдельных сущностей. Поэтому
+# ERROR_RATE ниже — это базовый уровень плато, а не буквальный error_rate
+# каждого конкретного дня.
+#
 # Использование:
 #   ./backfill_month.sh          # с самого начала
 #   ./backfill_month.sh 26       # возобновить с дня 26 (1-indexed) —
@@ -73,6 +81,7 @@ for i in $(seq 0 $((DAYS - 1))); do
     --orders-count "${orders_count}" \
     --payments-count "${payments_count}" \
     --error-rate "${ERROR_RATE}" \
+    --launch-date "${START_DATE}" \
     --payment-deadline-hours "${PAYMENT_DEADLINE_HOURS}" \
     --shipping-deadline-hours "${SHIPPING_DEADLINE_HOURS}" \
     --delivery-deadline-days "${DELIVERY_DEADLINE_DAYS}" \

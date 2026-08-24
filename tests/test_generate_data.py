@@ -47,6 +47,110 @@ class TestErrorCount:
 
 
 # ---------------------------------------------------------------------
+# resolve_error_rate / _ramp_multiplier / _incident_multiplier /
+# _build_incident_calendar
+# ---------------------------------------------------------------------
+
+
+class TestRampMultiplier:
+    def test_launch_day_is_at_peak(self):
+        assert gd._ramp_multiplier(0) == gd.RAMP_ERROR_INITIAL_MULTIPLIER
+
+    def test_before_launch_clamped_to_peak(self):
+        assert gd._ramp_multiplier(-5) == gd.RAMP_ERROR_INITIAL_MULTIPLIER
+
+    def test_decays_toward_baseline_over_time(self):
+        early = gd._ramp_multiplier(1)
+        mid = gd._ramp_multiplier(gd.RAMP_ERROR_DECAY_DAYS)
+        late = gd._ramp_multiplier(gd.RAMP_ERROR_DECAY_DAYS * 10)
+
+        assert early > mid > late
+        assert late == pytest.approx(1.0, abs=0.01)
+
+
+class TestIncidentMultiplier:
+    def test_no_calendar_gives_no_multiplier(self):
+        assert gd._incident_multiplier({}, "payments", 10) == 1.0
+
+    def test_day_inside_window_gets_multiplier(self):
+        calendar = {"payments": [(5, 3, 4.5)]}
+        assert gd._incident_multiplier(calendar, "payments", 6) == 4.5
+
+    def test_day_outside_window_unaffected(self):
+        calendar = {"payments": [(5, 3, 4.5)]}
+        assert gd._incident_multiplier(calendar, "payments", 20) == 1.0
+
+    def test_other_entity_unaffected(self):
+        calendar = {"payments": [(5, 3, 4.5)]}
+        assert gd._incident_multiplier(calendar, "orders", 6) == 1.0
+
+
+class TestBuildIncidentCalendar:
+    def test_covers_all_entities(self):
+        calendar = gd._build_incident_calendar()
+        assert set(calendar.keys()) == set(gd.DQ_ENTITIES)
+
+    def test_windows_are_non_overlapping_and_in_range(self):
+        calendar = gd._build_incident_calendar()
+
+        for windows in calendar.values():
+            prev_end = -1
+
+            for start, duration, multiplier in windows:
+                assert start >= prev_end
+                assert 0 < duration
+                assert (
+                    gd.INCIDENT_MULTIPLIER_RANGE[0]
+                    <= multiplier
+                    <= gd.INCIDENT_MULTIPLIER_RANGE[1]
+                )
+                prev_end = start + duration
+
+    def test_deterministic_across_calls(self):
+        assert gd._build_incident_calendar() == gd._build_incident_calendar()
+
+
+class TestResolveErrorRate:
+    def test_without_launch_date_returns_base_rate_unchanged(self):
+        rng = gd.make_rng(date(2026, 6, 1))
+        rate = gd.resolve_error_rate(
+            entity="orders",
+            load_date=date(2026, 6, 1),
+            base_rate=0.01,
+            rng=rng,
+            launch_date=None,
+        )
+        assert rate == 0.01
+
+    def test_with_launch_date_on_launch_day_is_elevated(self):
+        rng = gd.make_rng(date(2026, 6, 1))
+        rate = gd.resolve_error_rate(
+            entity="orders",
+            load_date=date(2026, 6, 1),
+            base_rate=0.01,
+            rng=rng,
+            launch_date=date(2026, 6, 1),
+            incident_calendar={},
+        )
+        # ramp-множитель на день запуска = RAMP_ERROR_INITIAL_MULTIPLIER,
+        # шум логнормальный вокруг 1.0 — берём широкий, но не бесконечный
+        # диапазон, чтобы не ловить флаки на хвостах распределения.
+        assert 0.01 < rate < 0.01 * gd.RAMP_ERROR_INITIAL_MULTIPLIER * 5
+
+    def test_never_exceeds_one(self):
+        rng = gd.make_rng(date(2026, 6, 1))
+        rate = gd.resolve_error_rate(
+            entity="orders",
+            load_date=date(2026, 6, 1),
+            base_rate=1.0,
+            rng=rng,
+            launch_date=date(2026, 6, 1),
+            incident_calendar={"orders": [(0, 5, 6.0)]},
+        )
+        assert rate <= 1.0
+
+
+# ---------------------------------------------------------------------
 # validate_args
 # ---------------------------------------------------------------------
 
@@ -58,6 +162,7 @@ class TestValidateArgs:
             orders_count=1000,
             payments_count=1000,
             error_rate=0.01,
+            launch_date=None,
             payment_deadline_hours=24,
             shipping_deadline_hours=48,
             delivery_deadline_days=7,
@@ -88,6 +193,13 @@ class TestValidateArgs:
     def test_error_rate_out_of_range_rejected(self):
         with pytest.raises(ValueError):
             gd.validate_args(self._args(error_rate=1.5))
+
+    def test_valid_launch_date_passes(self):
+        gd.validate_args(self._args(launch_date="2026-06-01"))  # should not raise
+
+    def test_malformed_launch_date_rejected(self):
+        with pytest.raises(ValueError):
+            gd.validate_args(self._args(launch_date="not-a-date"))
 
     def test_orders_without_clients_rejected(self):
         with pytest.raises(ValueError):

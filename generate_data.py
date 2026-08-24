@@ -160,6 +160,36 @@ PAYMENT_SUCCESS_RATE = 0.95
 # дня перехода внутри окна, не на факт, что он произойдёт.
 DAILY_ADVANCE_PROBABILITY = 0.6
 
+DQ_ENTITIES = ["clients", "orders", "payments"]
+
+# ---------------------------------------------------------------------
+# Реалистичная динамика error_rate (включается флагом --launch-date)
+#
+# Молодая площадка стартует с более высоким уровнем брака в данных —
+# интеграции ещё не обкатаны — который сглаживается к базовому по мере
+# взросления (RAMP_ERROR_*), плюс день-в-день логнормальный шум
+# (ERROR_RATE_NOISE_SIGMA) и редкие инциденты у отдельных источников
+# (сорвался партнёрский API, деплой с багом и т.п. — INCIDENT_*). Без
+# --launch-date ничего из этого не применяется, error_rate остаётся
+# ровно тем, что передали в --error-rate (обратная совместимость).
+# ---------------------------------------------------------------------
+
+RAMP_ERROR_INITIAL_MULTIPLIER = 4.0  # во сколько раз error_rate выше в день запуска
+RAMP_ERROR_DECAY_DAYS = 21  # характерное время спада к базовому уровню
+
+ERROR_RATE_NOISE_SIGMA = 0.15  # логнормальный день-в-день джиттер вокруг тренда
+
+# Календарь инцидентов строится на фиксированном сиде, НЕ зависящем от
+# load_date, поэтому каждый отдельный batch-запуск (генератор вызывается
+# по одному разу на день — см. backfill_month.sh) детерминированно
+# восстанавливает ОДИН И ТОТ ЖЕ календарь и корректно видит многодневные
+# инциденты без какого-либо состояния между запусками.
+INCIDENT_SCHEDULE_SEED = 20260601
+INCIDENT_HORIZON_DAYS = 730
+INCIDENT_DAILY_PROBABILITY = 0.02
+INCIDENT_DURATION_DAYS_RANGE = (2, 4)
+INCIDENT_MULTIPLIER_RANGE = (3.0, 6.0)
+
 SCHEMA_VERSION = "4.0.0"
 GENERATOR_VERSION = "4.0.0"
 
@@ -178,6 +208,10 @@ def parse_args() -> argparse.Namespace:
     # данных, с большим запасом (5%+) он тоже почти обнуляется.
     parser.add_argument("--payments-count", type=int, default=15_150)
     parser.add_argument("--error-rate", type=float, default=0.01)
+    # Опционально: включает реалистичную динамику error_rate (ramp-up
+    # после запуска + шум + инциденты) вместо буквального --error-rate
+    # каждый день — см. resolve_error_rate().
+    parser.add_argument("--launch-date", default=None)
 
     parser.add_argument("--payment-deadline-hours", type=int, default=24)
     parser.add_argument("--shipping-deadline-hours", type=int, default=48)
@@ -200,6 +234,14 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if not 0 <= args.error_rate <= 1:
         raise ValueError("--error-rate must be between 0 and 1")
+
+    if args.launch_date is not None:
+        try:
+            date.fromisoformat(args.launch_date)
+        except ValueError as exc:
+            raise ValueError(
+                "--launch-date must be an ISO date (YYYY-MM-DD)"
+            ) from exc
 
     for field in [
         "payment_deadline_hours",
@@ -285,6 +327,96 @@ def error_count(total_rows: int, error_rate: float, error_types: int) -> int:
         per_type = 1
 
     return min(per_type, total_rows // error_types)
+
+
+def _ramp_multiplier(day_index: int) -> float:
+    """
+    Множитель error_rate по дням с момента запуска площадки: максимум
+    (RAMP_ERROR_INITIAL_MULTIPLIER) в день запуска, экспоненциальный спад
+    к 1.0 (базовый уровень) с характерным временем RAMP_ERROR_DECAY_DAYS.
+    day_index <= 0 (день запуска или раньше) даёт максимум как есть — без
+    экспоненты, чтобы не улетать в бесконечность на отрицательных днях.
+    """
+    if day_index <= 0:
+        return RAMP_ERROR_INITIAL_MULTIPLIER
+
+    return 1.0 + (RAMP_ERROR_INITIAL_MULTIPLIER - 1.0) * math.exp(
+        -day_index / RAMP_ERROR_DECAY_DAYS
+    )
+
+
+def _build_incident_calendar() -> dict[str, list[tuple[int, int, float]]]:
+    """
+    Строит календарь редких DQ-инцидентов по каждой сущности на
+    INCIDENT_HORIZON_DAYS вперёд от launch_date: список
+    (день_старта, длительность_дней, множитель_error_rate) на сущность.
+    Окна внутри одной сущности не пересекаются.
+    """
+    rng = np.random.default_rng(INCIDENT_SCHEDULE_SEED)
+    calendar: dict[str, list[tuple[int, int, float]]] = {}
+
+    for entity in DQ_ENTITIES:
+        windows: list[tuple[int, int, float]] = []
+        day = 0
+
+        while day < INCIDENT_HORIZON_DAYS:
+            if rng.random() < INCIDENT_DAILY_PROBABILITY:
+                duration = int(
+                    rng.integers(
+                        INCIDENT_DURATION_DAYS_RANGE[0],
+                        INCIDENT_DURATION_DAYS_RANGE[1] + 1,
+                    )
+                )
+                multiplier = float(rng.uniform(*INCIDENT_MULTIPLIER_RANGE))
+                windows.append((day, duration, multiplier))
+                day += duration
+            else:
+                day += 1
+
+        calendar[entity] = windows
+
+    return calendar
+
+
+def _incident_multiplier(
+    calendar: dict[str, list[tuple[int, int, float]]],
+    entity: str,
+    day_index: int,
+) -> float:
+    for start, duration, multiplier in calendar.get(entity, []):
+        if start <= day_index < start + duration:
+            return multiplier
+
+    return 1.0
+
+
+def resolve_error_rate(
+    entity: str,
+    load_date: date,
+    base_rate: float,
+    rng: np.random.Generator,
+    launch_date: date | None,
+    incident_calendar: dict[str, list[tuple[int, int, float]]] | None = None,
+) -> float:
+    """
+    Эффективный error_rate на день для конкретной сущности: базовый
+    уровень (`base_rate`), умноженный на ramp-затухание с момента запуска,
+    день-в-день логнормальный шум и, если сегодня попадает в календарь
+    инцидентов этой сущности, дополнительный множитель всплеска.
+
+    Без launch_date возвращает base_rate как есть — весь реализм-слой
+    выключен (обратная совместимость с прямыми вызовами generate_*).
+    """
+    if launch_date is None:
+        return base_rate
+
+    day_index = (load_date - launch_date).days
+
+    ramp = _ramp_multiplier(day_index)
+    noise = float(rng.lognormal(mean=0.0, sigma=ERROR_RATE_NOISE_SIGMA))
+    incident = _incident_multiplier(incident_calendar or {}, entity, day_index)
+
+    return min(base_rate * ramp * noise * incident, 1.0)
 
 
 def ensure_batch_does_not_exist(source_root: Path, load_date: date) -> None:
@@ -1156,13 +1288,30 @@ def main() -> None:
     rng = make_rng(load_date)
     now = datetime.combine(load_date, time(23, 59, 59))
 
+    launch_date = (
+        date.fromisoformat(args.launch_date) if args.launch_date else None
+    )
+    incident_calendar = _build_incident_calendar() if launch_date else {}
+
+    effective_error_rates = {
+        entity: resolve_error_rate(
+            entity=entity,
+            load_date=load_date,
+            base_rate=args.error_rate,
+            rng=rng,
+            launch_date=launch_date,
+            incident_calendar=incident_calendar,
+        )
+        for entity in DQ_ENTITIES
+    }
+
     existing_clients_df = load_existing_clients(source_root, load_date)
 
     new_clients_df, clients_dq = generate_clients(
         load_date=load_date,
         count=args.clients_count,
         rng=rng,
-        error_rate=args.error_rate,
+        error_rate=effective_error_rates["clients"],
         existing_client_ids=existing_clients_df["client_id"].dropna().tolist()
         if not existing_clients_df.empty
         else None,
@@ -1178,7 +1327,7 @@ def main() -> None:
         count=args.orders_count,
         clients_df=all_clients_df,
         rng=rng,
-        error_rate=args.error_rate,
+        error_rate=effective_error_rates["orders"],
     )
 
     lookback_days = compute_lookback_days(args)
@@ -1202,7 +1351,7 @@ def main() -> None:
         cancel_before_payment_rate=args.cancel_before_payment_rate,
         cancel_after_payment_rate=args.cancel_after_payment_rate,
         return_rate=args.return_rate,
-        error_rate=args.error_rate,
+        error_rate=effective_error_rates["orders"],
     )
 
     advanced_ids = set(advanced_df["order_id"]) if not advanced_df.empty else set()
@@ -1217,7 +1366,7 @@ def main() -> None:
         new_status_orders_df=still_new_pool_df,
         count=args.payments_count,
         rng=rng,
-        error_rate=args.error_rate,
+        error_rate=effective_error_rates["payments"],
         now=now,
     )
 
@@ -1264,6 +1413,8 @@ def main() -> None:
             "schema_version": SCHEMA_VERSION,
             "seed": int(load_date.strftime("%Y%m%d")),
             "configured_error_rate": args.error_rate,
+            "launch_date": launch_date.isoformat() if launch_date else None,
+            "effective_error_rate": effective_error_rates,
             "entities": {
                 "clients": {
                     "rows": len(new_clients_df),
