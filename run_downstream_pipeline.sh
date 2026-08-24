@@ -27,7 +27,7 @@ set -euo pipefail
 
 DATA_DIR="./data"
 START_DATE="2026-06-01"
-DAYS=82
+DAYS=85
 
 CLICKHOUSE_HOST="localhost"
 CLICKHOUSE_PORT="8123"
