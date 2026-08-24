@@ -78,7 +78,7 @@ ORDER BY (payment_id);
 
 CREATE TABLE IF NOT EXISTS analytics.quarantine_clients
 (
-    client_id            String,
+    client_id            Nullable(String),
     registration_date    Nullable(DateTime),
     city                 LowCardinality(String),
     acquisition_channel  LowCardinality(String),
@@ -89,7 +89,11 @@ CREATE TABLE IF NOT EXISTS analytics.quarantine_clients
 )
 ENGINE = MergeTree
 PARTITION BY load_date
-ORDER BY (load_date, client_id);
+ORDER BY (load_date, client_id)
+-- client_id может быть NULL (см. CLIENT_ID_EMPTY в transform.py) и при
+-- этом остаётся частью ключа сортировки — ClickHouse требует явного
+-- разрешения на Nullable-колонки в ORDER BY.
+SETTINGS allow_nullable_key = 1;
 
 CREATE TABLE IF NOT EXISTS analytics.quarantine_orders
 (
