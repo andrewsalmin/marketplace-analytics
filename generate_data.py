@@ -674,14 +674,22 @@ def generate_clients(
     fake = Faker("ru_RU")
     fake.seed_instance(int(load_date.strftime("%Y%m%d")))
 
-    offsets = rng.integers(0, 365, size=count)
-    registration_days = [load_date - timedelta(days=int(d)) for d in offsets]
-
     # Без launch_date клиент может "регистрироваться" сколь угодно давно
-    # относительно load_date — при бэкфилле с launch_date это нереалистично:
-    # маркетплейс физически не мог иметь клиентов до дня открытия.
+    # относительно load_date. При бэкфилле с launch_date смещение нужно
+    # сэмплировать уже из диапазона [0, дней_с_запуска] — маркетплейс
+    # физически не мог иметь клиентов до дня открытия. Постфактумный клэмпинг
+    # (max(d, launch_date) после сэмплирования из фиксированных 0-365) даёт
+    # искусственную кучу клиентов ровно на launch_date: пока бэкафилл идёт в
+    # пределах первого года после запуска, доля смещений, не попадающих в
+    # окно [launch_date, load_date], растёт с каждым днём и вся она стекается
+    # в одну точку вместо распределения по реальному диапазону дат.
     if launch_date is not None:
-        registration_days = [max(d, launch_date) for d in registration_days]
+        max_offset = max((load_date - launch_date).days, 0)
+        offsets = rng.integers(0, max_offset + 1, size=count)
+    else:
+        offsets = rng.integers(0, 365, size=count)
+
+    registration_days = [load_date - timedelta(days=int(d)) for d in offsets]
 
     registration_dates = _realistic_timestamps(registration_days, rng)
     city_weights = np.array(CITY_WEIGHTS, dtype=float)
