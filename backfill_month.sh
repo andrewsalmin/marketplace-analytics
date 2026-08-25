@@ -25,7 +25,7 @@ set -euo pipefail
 
 DATA_DIR="./data"
 START_DATE="2026-06-01"
-DAYS=85
+DAYS=92
 RESUME_FROM_DAY="${1:-1}"  # 1-indexed, как в выводе "(день N/DAYS)"
 
 RAMP_DAYS=27  # первые ~4 недели — фаза роста, дальше — плато

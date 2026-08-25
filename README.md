@@ -85,7 +85,7 @@ docker compose up -d clickhouse
 ./backfill_month.sh
 ```
 
-82 дня (2026-06-01 → 2026-08-21), рампа объёма 27 дней + плато. Форма
+92 дня (2026-06-01 → 2026-08-31, весь летний сезон), рампа объёма 27 дней + плато. Форма
 кривой и диапазон дат — константы в начале скрипта, меняются на месте.
 При сбое посреди прогона — `./backfill_month.sh <день>` (см.
 комментарий в шапке скрипта).
@@ -104,6 +104,23 @@ docker compose up -d clickhouse
 `load_to_clickhouse.py`. Загрузка в ClickHouse идемпотентна (см.
 «Идемпотентная загрузка в ClickHouse» ниже) — скрипт безопасно
 перезапускать, уже загруженные дни просто пропускаются.
+
+И `backfill_month.sh`, и `run_downstream_pipeline.sh` могут идти часами
+(генерация + Spark на десятки дней). Обычный foreground-процесс в
+SSH-сессии получит `SIGHUP` и оборвётся при закрытии терминала —
+запускай в чём-то, что переживает отключение:
+
+```bash
+# tmux/screen — можно вернуться и посмотреть прогресс
+tmux new -s pipeline
+./run_downstream_pipeline.sh "$CLICKHOUSE_PASSWORD"
+# отключиться: Ctrl+B, затем D; вернуться: tmux attach -t pipeline
+
+# либо nohup + фон
+nohup ./run_downstream_pipeline.sh "$CLICKHOUSE_PASSWORD" > pipeline.log 2>&1 &
+disown
+# прогресс: tail -f pipeline.log
+```
 
 **Перезагрузить один конкретный день** (например, если подозреваешь
 задвоение из-за более раннего сбоя коннектора):
