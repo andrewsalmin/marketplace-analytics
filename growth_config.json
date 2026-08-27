@@ -1,0 +1,15 @@
+{
+  "start_date": "2026-06-01",
+  "ramp_days": 27,
+  "payments_margin_pct": 101,
+  "error_rate": 0.01,
+  "payment_deadline_hours": 24,
+  "shipping_deadline_hours": 48,
+  "delivery_deadline_days": 7,
+  "pickup_deadline_days": 7,
+  "return_window_days": 14,
+  "refund_processing_hours": 72,
+  "cancel_before_payment_rate": 0.02,
+  "cancel_after_payment_rate": 0.01,
+  "return_rate": 0.05
+}

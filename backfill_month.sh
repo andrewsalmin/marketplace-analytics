@@ -24,29 +24,37 @@
 set -euo pipefail
 
 DATA_DIR="./data"
-START_DATE="2026-06-01"
 DAYS=92
 RESUME_FROM_DAY="${1:-1}"  # 1-indexed, как в выводе "(день N/DAYS)"
 
-RAMP_DAYS=27  # первые ~4 недели — фаза роста, дальше — плато
+# Все параметры ниже — единый источник правды в growth_config.json,
+# общий с Airflow DAG'ом (daily_marketplace_pipeline): без этого ручной
+# бэкафилл и ежедневный пайплайн рано или поздно разъедутся по бизнес-
+# правилам и объёму. Менять значения — только в growth_config.json,
+# не здесь.
+GROWTH_CONFIG="$(dirname "$0")/growth_config.json"
+_cfg() { python -c "import json; print(json.load(open('${GROWTH_CONFIG}'))['$1'])"; }
+
+START_DATE=$(_cfg start_date)
+RAMP_DAYS=$(_cfg ramp_days)
 
 # --- Политика бизнеса: постоянна весь месяц, НЕ часть кривой роста ---
-PAYMENT_DEADLINE_HOURS=24
-SHIPPING_DEADLINE_HOURS=48
-DELIVERY_DEADLINE_DAYS=7
-PICKUP_DEADLINE_DAYS=7
-RETURN_WINDOW_DAYS=14
-REFUND_PROCESSING_HOURS=72
-CANCEL_BEFORE_PAYMENT_RATE=0.02
-CANCEL_AFTER_PAYMENT_RATE=0.01
-RETURN_RATE=0.05
-ERROR_RATE=0.01
+PAYMENT_DEADLINE_HOURS=$(_cfg payment_deadline_hours)
+SHIPPING_DEADLINE_HOURS=$(_cfg shipping_deadline_hours)
+DELIVERY_DEADLINE_DAYS=$(_cfg delivery_deadline_days)
+PICKUP_DEADLINE_DAYS=$(_cfg pickup_deadline_days)
+RETURN_WINDOW_DAYS=$(_cfg return_window_days)
+REFUND_PROCESSING_HOURS=$(_cfg refund_processing_hours)
+CANCEL_BEFORE_PAYMENT_RATE=$(_cfg cancel_before_payment_rate)
+CANCEL_AFTER_PAYMENT_RATE=$(_cfg cancel_after_payment_rate)
+RETURN_RATE=$(_cfg return_rate)
+ERROR_RATE=$(_cfg error_rate)
 
 # --- Запас попыток оплаты над числом заказов: подобран эмпирически на
 # ~1%, чтобы доля не оплаченных в срок заказов (cancelled/
 # not_paid_in_time) была реалистичной (~1-2%), а не нулевой — большой
 # запас (5%+) практически полностью вымывает этот тип отмены из данных.
-PAYMENTS_MARGIN_PCT=101
+PAYMENTS_MARGIN_PCT=$(_cfg payments_margin_pct)
 
 for i in $(seq 0 $((DAYS - 1))); do
   day_number=$((i + 1))
