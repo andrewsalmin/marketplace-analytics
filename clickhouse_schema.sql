@@ -15,9 +15,9 @@
 -- лежать сразу все версии строки. quarantine_*/dq_metrics не
 -- переиздаются — обычный MergeTree.
 
-CREATE DATABASE IF NOT EXISTS analytics;
+CREATE DATABASE IF NOT EXISTS marketplace_analytics;
 
-CREATE TABLE IF NOT EXISTS analytics.clients
+CREATE TABLE IF NOT EXISTS marketplace_analytics.clients
 (
     client_id           String,
     registration_date   DateTime,
@@ -31,7 +31,7 @@ ENGINE = ReplacingMergeTree(ingested_at)
 PARTITION BY load_date
 ORDER BY (client_id);
 
-CREATE TABLE IF NOT EXISTS analytics.orders
+CREATE TABLE IF NOT EXISTS marketplace_analytics.orders
 (
     order_id            String,
     client_id           String,
@@ -58,7 +58,7 @@ PARTITION BY load_date
 -- эквивалентен order_id, но упорядочивает данные по времени создания.
 ORDER BY (created_at, client_id, order_id);
 
-CREATE TABLE IF NOT EXISTS analytics.payments
+CREATE TABLE IF NOT EXISTS marketplace_analytics.payments
 (
     payment_id     String,
     order_id       String,
@@ -76,7 +76,7 @@ PARTITION BY load_date
 -- payment_id разрешает success/refunded версии одного платежа.
 ORDER BY (payment_id);
 
-CREATE TABLE IF NOT EXISTS analytics.quarantine_clients
+CREATE TABLE IF NOT EXISTS marketplace_analytics.quarantine_clients
 (
     client_id            Nullable(String),
     registration_date    Nullable(DateTime),
@@ -95,7 +95,7 @@ ORDER BY (load_date, client_id)
 -- разрешения на Nullable-колонки в ORDER BY.
 SETTINGS allow_nullable_key = 1;
 
-CREATE TABLE IF NOT EXISTS analytics.quarantine_orders
+CREATE TABLE IF NOT EXISTS marketplace_analytics.quarantine_orders
 (
     order_id             String,
     client_id            Nullable(String),
@@ -119,7 +119,7 @@ ENGINE = MergeTree
 PARTITION BY load_date
 ORDER BY (load_date, order_id);
 
-CREATE TABLE IF NOT EXISTS analytics.quarantine_payments
+CREATE TABLE IF NOT EXISTS marketplace_analytics.quarantine_payments
 (
     payment_id            String,
     order_id              Nullable(String),
@@ -135,7 +135,7 @@ ENGINE = MergeTree
 PARTITION BY load_date
 ORDER BY (load_date, payment_id);
 
-CREATE TABLE IF NOT EXISTS analytics.dq_metrics
+CREATE TABLE IF NOT EXISTS marketplace_analytics.dq_metrics
 (
     load_date   Date,
     entity      LowCardinality(String),
@@ -152,7 +152,7 @@ ORDER BY (load_date, entity);
 -- принцип, что commit.json в generate_data.py (publish_batch): маркер
 -- как единственный источник истины о том, что батч точно догружен
 -- целиком, а не "файлы вроде на месте".
-CREATE TABLE IF NOT EXISTS analytics._load_commits
+CREATE TABLE IF NOT EXISTS marketplace_analytics._load_commits
 (
     load_date  Date,
     entity     LowCardinality(String),

@@ -13,7 +13,7 @@ services:
       # либо положи в .env рядом с этим файлом (.env — в .gitignore).
       CLICKHOUSE_USER: analytics_user
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD before starting}
-      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_DB: marketplace_analytics
     volumes:
       - clickhouse_data:/var/lib/clickhouse
     ulimits:

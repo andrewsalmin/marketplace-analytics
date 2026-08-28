@@ -48,7 +48,7 @@ def parse_args():
 
     parser.add_argument(
         "--clickhouse-database",
-        default="analytics",
+        default="marketplace_analytics",
     )
 
     parser.add_argument(
@@ -118,9 +118,9 @@ def ch_execute(args, sql: str, use_database: bool = True) -> str:
     резолв JAR'ов).
 
     use_database=False — для CREATE DATABASE IF NOT EXISTS на чистом
-    кластере: если передать ?database=analytics до того, как эта база
-    вообще создана, ClickHouse откажет с "Database analytics doesn't
-    exist" ещё до выполнения самого запроса.
+    кластере: если передать ?database=marketplace_analytics до того, как
+    эта база вообще создана, ClickHouse откажет с "Database
+    marketplace_analytics doesn't exist" ещё до выполнения самого запроса.
     """
     url = f"http://{args.clickhouse_host}:{args.clickhouse_port}/"
     if use_database:

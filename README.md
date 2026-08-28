@@ -75,7 +75,7 @@ docker compose up -d clickhouse
 ```
 
 Поднимает `clickhouse/clickhouse-server` с пользователем
-`analytics_user`/`$CLICKHOUSE_PASSWORD` и базой `analytics` (HTTP —
+`analytics_user`/`$CLICKHOUSE_PASSWORD` и базой `marketplace_analytics` (HTTP —
 `localhost:8123`, native-протокол для `clickhouse-client` —
 `localhost:9000`). См. `docker-compose.yml`.
 
@@ -137,7 +137,7 @@ python load_to_clickhouse.py \
 ```bash
 docker exec -it analytics-clickhouse clickhouse-client \
   --user analytics_user --password "$CLICKHOUSE_PASSWORD" \
-  --query "SELECT load_date, entity, rows, loaded_at FROM analytics._load_commits ORDER BY load_date"
+  --query "SELECT load_date, entity, rows, loaded_at FROM marketplace_analytics._load_commits ORDER BY load_date"
 ```
 
 ## Архитектура

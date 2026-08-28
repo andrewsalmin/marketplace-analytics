@@ -31,7 +31,7 @@ DAYS=92
 
 CLICKHOUSE_HOST="localhost"
 CLICKHOUSE_PORT="8123"
-CLICKHOUSE_DATABASE="analytics"
+CLICKHOUSE_DATABASE="marketplace_analytics"
 CLICKHOUSE_USER="analytics_user"
 CLICKHOUSE_PASSWORD="${1:?Usage: ./run_downstream_pipeline.sh <clickhouse_password> [resume_from_day]}"
 RESUME_FROM_DAY="${2:-1}"  # 1-indexed, как в выводе "(день N/DAYS)"
