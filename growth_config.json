@@ -1,6 +1,15 @@
 {
   "start_date": "2026-06-01",
   "ramp_days": 27,
+  "weekday_multipliers": {
+    "1": 1.0,
+    "2": 1.0,
+    "3": 1.0,
+    "4": 1.0,
+    "5": 1.05,
+    "6": 0.8,
+    "7": 0.85
+  },
   "payments_margin_pct": 101,
   "error_rate": 0.01,
   "payment_deadline_hours": 24,

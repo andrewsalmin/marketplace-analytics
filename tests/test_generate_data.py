@@ -67,6 +67,14 @@ class TestRampMultiplier:
         assert early > mid > late
         assert late == pytest.approx(1.0, abs=0.01)
 
+    def test_custom_initial_multiplier_is_used_at_launch_day(self):
+        assert gd._ramp_multiplier(0, initial_multiplier=3.0, decay_days=14) == 3.0
+
+    def test_custom_decay_days_changes_the_curve(self):
+        default = gd._ramp_multiplier(10)
+        custom = gd._ramp_multiplier(10, initial_multiplier=3.0, decay_days=14)
+        assert custom != default
+
 
 class TestIncidentMultiplier:
     def test_no_calendar_gives_no_multiplier(self):
@@ -148,6 +156,88 @@ class TestResolveErrorRate:
             incident_calendar={"orders": [(0, 5, 6.0)]},
         )
         assert rate <= 1.0
+
+
+class TestResolveCount:
+    def test_without_launch_date_returns_base_count_unchanged(self):
+        rng = gd.make_rng(date(2026, 6, 1))
+        count = gd.resolve_count(base_count=200, rng=rng, launch_date=None)
+        assert count == 200
+
+    def test_zero_base_count_stays_zero(self):
+        rng = gd.make_rng(date(2026, 6, 1))
+        count = gd.resolve_count(
+            base_count=0, rng=rng, launch_date=date(2026, 6, 1)
+        )
+        assert count == 0
+
+    def test_with_launch_date_applies_noise_within_reasonable_range(self):
+        rng = gd.make_rng(date(2026, 6, 1))
+        count = gd.resolve_count(
+            base_count=200, rng=rng, launch_date=date(2026, 6, 1)
+        )
+        # логнормальный шум вокруг 1.0 — берём широкий, но не бесконечный
+        # диапазон, чтобы не ловить флаки на хвостах распределения.
+        assert 1 <= count <= 200 * 5
+
+    def test_never_goes_below_one(self):
+        rng = gd.make_rng(date(2026, 6, 1))
+        count = gd.resolve_count(
+            base_count=1, rng=rng, launch_date=date(2026, 6, 1)
+        )
+        assert count >= 1
+
+
+class TestResolvePaymentSuccessRate:
+    def test_without_launch_date_returns_base_rate_unchanged(self):
+        rng = gd.make_rng(date(2026, 6, 1))
+        rate = gd.resolve_payment_success_rate(
+            load_date=date(2026, 6, 1), rng=rng, launch_date=None
+        )
+        assert rate == gd.PAYMENT_SUCCESS_RATE
+
+    def test_with_launch_date_on_launch_day_is_depressed(self):
+        rng = gd.make_rng(date(2026, 6, 1))
+        rate = gd.resolve_payment_success_rate(
+            load_date=date(2026, 6, 1),
+            rng=rng,
+            launch_date=date(2026, 6, 1),
+            incident_calendar={},
+        )
+        # На день запуска failure_rate поднят RAMP_PAYMENT_FAILURE_
+        # INITIAL_MULTIPLIER-кратно — success rate должен быть заметно
+        # ниже базового, но не отрицательным.
+        assert 0.0 <= rate < gd.PAYMENT_SUCCESS_RATE
+
+    def test_never_goes_below_zero(self):
+        rng = gd.make_rng(date(2026, 6, 1))
+        rate = gd.resolve_payment_success_rate(
+            load_date=date(2026, 6, 1),
+            rng=rng,
+            launch_date=date(2026, 6, 1),
+            incident_calendar={"payments": [(0, 5, 6.0)]},
+        )
+        assert rate >= 0.0
+
+    def test_decays_toward_base_rate_over_time(self):
+        launch_date = date(2026, 6, 1)
+        early_rng = gd.make_rng(launch_date)
+        late_rng = gd.make_rng(launch_date)
+
+        early = gd.resolve_payment_success_rate(
+            load_date=launch_date,
+            rng=early_rng,
+            launch_date=launch_date,
+            incident_calendar={},
+        )
+        late = gd.resolve_payment_success_rate(
+            load_date=launch_date
+            + timedelta(days=gd.RAMP_PAYMENT_FAILURE_DECAY_DAYS * 10),
+            rng=late_rng,
+            launch_date=launch_date,
+            incident_calendar={},
+        )
+        assert late > early
 
 
 # ---------------------------------------------------------------------
@@ -601,6 +691,21 @@ class TestGeneratePayments:
         assert (
             payments["payment_id"].duplicated().sum()
         ) == dq["payments.duplicate_payment_id_rows"]
+
+    def test_custom_success_rate_is_honored(self, sample_new_orders):
+        rng = gd.make_rng(date(2026, 3, 1))
+        payments, _, paid_orders = gd.generate_payments(
+            load_date=date(2026, 3, 1),
+            new_status_orders_df=sample_new_orders,
+            count=len(sample_new_orders),
+            rng=rng,
+            error_rate=0.0,
+            now=NOW,
+            success_rate=0.0,
+        )
+        # success_rate=0.0 — ни одна попытка не должна пройти успешно.
+        assert (payments["status"] == "success").sum() == 0
+        assert paid_orders.empty
 
 
 # ---------------------------------------------------------------------

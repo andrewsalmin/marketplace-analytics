@@ -35,6 +35,15 @@ RESUME_FROM_DAY="${1:-1}"  # 1-indexed, как в выводе "(день N/DAYS
 GROWTH_CONFIG="$(dirname "$0")/growth_config.json"
 _cfg() { python -c "import json; print(json.load(open('${GROWTH_CONFIG}'))['$1'])"; }
 
+# Множитель на объём (clients/orders) по дню недели — 1..7, ISO
+# (1=понедельник, 7=воскресенье, см. `date +%u`), ключ строкой — так и
+# лежит в growth_config.json. Тот же файл читает и Airflow DAG, поэтому
+# сами коэффициенты определены только там, а не захардкожены здесь.
+_weekday_multiplier() {
+  python -c "import json; print(json.load(open('${GROWTH_CONFIG}'))['weekday_multipliers']['$1'])"
+}
+_apply_multiplier() { python -c "print(round($1 * $2))"; }
+
 START_DATE=$(_cfg start_date)
 RAMP_DAYS=$(_cfg ramp_days)
 
@@ -78,6 +87,16 @@ for i in $(seq 0 $((DAYS - 1))); do
     clients_count=$((80 + RAMP_DAYS * 4 + plateau_day))       # ~188 -> ~242
     orders_count=$((300 + RAMP_DAYS * 44 + plateau_day * 5))  # ~1488 -> ~1758
   fi
+
+  # Недельная сезонность поверх кривой роста — будни/выходные не
+  # одинаковы по объёму (см. weekday_multipliers в growth_config.json).
+  # Мультипликативный день-в-день шум сверху этого добавляет уже сам
+  # generate_data.py (resolve_count(), включается вместе с --launch-date).
+  weekday=$(date -d "${load_date}" +%u)
+  weekday_multiplier=$(_weekday_multiplier "${weekday}")
+  clients_count=$(_apply_multiplier "${clients_count}" "${weekday_multiplier}")
+  orders_count=$(_apply_multiplier "${orders_count}" "${weekday_multiplier}")
+
   payments_count=$((orders_count * PAYMENTS_MARGIN_PCT / 100))
 
   echo "=== ${load_date} (день ${day_number}/${DAYS}): clients=${clients_count} orders=${orders_count} payments=${payments_count} ==="

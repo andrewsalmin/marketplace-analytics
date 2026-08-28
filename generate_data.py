@@ -227,6 +227,34 @@ INCIDENT_DAILY_PROBABILITY = 0.02
 INCIDENT_DURATION_DAYS_RANGE = (2, 4)
 INCIDENT_MULTIPLIER_RANGE = (3.0, 6.0)
 
+# Мультипликативный день-в-день логнормальный шум для целевого объёма
+# (--clients-count/--orders-count/--payments-count), включается вместе с
+# --launch-date по тому же принципу, что и ERROR_RATE_NOISE_SIGMA: без
+# него бэкафилл (backfill_month.sh) даёт идеально гладкую детерминированную
+# кривую роста, что визуально не похоже на реальные данные.
+VOLUME_NOISE_SIGMA = 0.15
+
+# ---------------------------------------------------------------------
+# Реалистичная динамика PAYMENT_SUCCESS_RATE (включается флагом
+# --launch-date)
+#
+# Молодая платёжная интеграция стартует с более высокой долей отказов
+# оплаты (карта/СБП ещё не обкатаны), которая сглаживается к базовому
+# уровню по мере взросления, плюс день-в-день шум. Реализовано через
+# failure_rate = 1 - PAYMENT_SUCCESS_RATE, чтобы переиспользовать
+# _ramp_multiplier как есть (та же форма кривой, что и у error_rate,
+# только со своими константами и без re-derive формулы). Инцидентный
+# всплеск переиспользует уже существующий календарь сущности "payments" —
+# сбой платёжной инфраструктуры правдоподобно бьёт и по DQ, и по
+# конверсии оплаты одновременно. Без --launch-date ничего из этого не
+# применяется, PAYMENT_SUCCESS_RATE остаётся ровно базовой константой.
+# ---------------------------------------------------------------------
+
+RAMP_PAYMENT_FAILURE_INITIAL_MULTIPLIER = 3.0  # во сколько раз выше доля отказов оплаты в день запуска
+RAMP_PAYMENT_FAILURE_DECAY_DAYS = 14  # платёжный процессинг обкатывается быстрее, чем DQ-интеграции
+
+PAYMENT_FAILURE_NOISE_SIGMA = 0.15  # логнормальный день-в-день джиттер вокруг тренда
+
 SCHEMA_VERSION = "4.0.0"
 GENERATOR_VERSION = "4.0.0"
 
@@ -366,20 +394,24 @@ def error_count(total_rows: int, error_rate: float, error_types: int) -> int:
     return min(per_type, total_rows // error_types)
 
 
-def _ramp_multiplier(day_index: int) -> float:
+def _ramp_multiplier(
+    day_index: int,
+    initial_multiplier: float = RAMP_ERROR_INITIAL_MULTIPLIER,
+    decay_days: int = RAMP_ERROR_DECAY_DAYS,
+) -> float:
     """
-    Множитель error_rate по дням с момента запуска площадки: максимум
-    (RAMP_ERROR_INITIAL_MULTIPLIER) в день запуска, экспоненциальный спад
-    к 1.0 (базовый уровень) с характерным временем RAMP_ERROR_DECAY_DAYS.
-    day_index <= 0 (день запуска или раньше) даёт максимум как есть — без
-    экспоненты, чтобы не улетать в бесконечность на отрицательных днях.
+    Множитель по дням с момента запуска площадки: максимум
+    `initial_multiplier` в день запуска, экспоненциальный спад к 1.0
+    (базовый уровень) с характерным временем `decay_days`. day_index <= 0
+    (день запуска или раньше) даёт максимум как есть — без экспоненты,
+    чтобы не улетать в бесконечность на отрицательных днях. Параметры по
+    умолчанию — ramp error_rate; resolve_payment_success_rate()
+    переиспользует эту же функцию со своими RAMP_PAYMENT_FAILURE_*.
     """
     if day_index <= 0:
-        return RAMP_ERROR_INITIAL_MULTIPLIER
+        return initial_multiplier
 
-    return 1.0 + (RAMP_ERROR_INITIAL_MULTIPLIER - 1.0) * math.exp(
-        -day_index / RAMP_ERROR_DECAY_DAYS
-    )
+    return 1.0 + (initial_multiplier - 1.0) * math.exp(-day_index / decay_days)
 
 
 def _build_incident_calendar() -> dict[str, list[tuple[int, int, float]]]:
@@ -454,6 +486,61 @@ def resolve_error_rate(
     incident = _incident_multiplier(incident_calendar or {}, entity, day_index)
 
     return min(base_rate * ramp * noise * incident, 1.0)
+
+
+def resolve_payment_success_rate(
+    load_date: date,
+    rng: np.random.Generator,
+    launch_date: date | None,
+    incident_calendar: dict[str, list[tuple[int, int, float]]] | None = None,
+) -> float:
+    """
+    Эффективный PAYMENT_SUCCESS_RATE на день. Без launch_date возвращает
+    базовую константу как есть.
+
+    С launch_date считается через failure_rate = 1 - PAYMENT_SUCCESS_RATE,
+    к которому применяется тот же ramp+noise+incident механизм, что и в
+    resolve_error_rate (свои RAMP_PAYMENT_FAILURE_*/
+    PAYMENT_FAILURE_NOISE_SIGMA константы, но переиспользованная запись
+    "payments" из календаря инцидентов — один и тот же сбой платёжной
+    инфраструктуры правдоподобно бьёт и по DQ, и по конверсии оплаты),
+    затем конвертируется обратно в success rate.
+    """
+    if launch_date is None:
+        return PAYMENT_SUCCESS_RATE
+
+    base_failure_rate = 1.0 - PAYMENT_SUCCESS_RATE
+    day_index = (load_date - launch_date).days
+
+    ramp = _ramp_multiplier(
+        day_index,
+        RAMP_PAYMENT_FAILURE_INITIAL_MULTIPLIER,
+        RAMP_PAYMENT_FAILURE_DECAY_DAYS,
+    )
+    noise = float(rng.lognormal(mean=0.0, sigma=PAYMENT_FAILURE_NOISE_SIGMA))
+    incident = _incident_multiplier(incident_calendar or {}, "payments", day_index)
+
+    failure_rate = min(base_failure_rate * ramp * noise * incident, 1.0)
+    return 1.0 - failure_rate
+
+
+def resolve_count(
+    base_count: int,
+    rng: np.random.Generator,
+    launch_date: date | None,
+) -> int:
+    """
+    Применяет мультипликативный логнормальный шум к целевому объёму
+    (--clients-count/--orders-count) — сама кривая роста детерминированно
+    считается в backfill_month.sh, здесь только день-в-день джиттер вокруг
+    неё. Без launch_date возвращает base_count как есть (обратная
+    совместимость с прямыми вызовами generate_data.py вне бэкафилла).
+    """
+    if launch_date is None or base_count == 0:
+        return base_count
+
+    noise = float(rng.lognormal(mean=0.0, sigma=VOLUME_NOISE_SIGMA))
+    return max(1, round(base_count * noise))
 
 
 def ensure_batch_does_not_exist(source_root: Path, load_date: date) -> None:
@@ -663,7 +750,6 @@ def generate_clients(
     rng: np.random.Generator,
     error_rate: float = 0.0,
     existing_client_ids: list[str] | None = None,
-    launch_date: date | None = None,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     if count == 0:
         return pd.DataFrame(columns=CLIENT_COLUMNS), {}
@@ -674,24 +760,15 @@ def generate_clients(
     fake = Faker("ru_RU")
     fake.seed_instance(int(load_date.strftime("%Y%m%d")))
 
-    # Без launch_date клиент может "регистрироваться" сколь угодно давно
-    # относительно load_date. При бэкфилле с launch_date смещение нужно
-    # сэмплировать уже из диапазона [0, дней_с_запуска] — маркетплейс
-    # физически не мог иметь клиентов до дня открытия. Постфактумный клэмпинг
-    # (max(d, launch_date) после сэмплирования из фиксированных 0-365) даёт
-    # искусственную кучу клиентов ровно на launch_date: пока бэкафилл идёт в
-    # пределах первого года после запуска, доля смещений, не попадающих в
-    # окно [launch_date, load_date], растёт с каждым днём и вся она стекается
-    # в одну точку вместо распределения по реальному диапазону дат.
-    if launch_date is not None:
-        max_offset = max((load_date - launch_date).days, 0)
-        offsets = rng.integers(0, max_offset + 1, size=count)
-    else:
-        offsets = rng.integers(0, 365, size=count)
-
-    registration_days = [load_date - timedelta(days=int(d)) for d in offsets]
-
-    registration_dates = _realistic_timestamps(registration_days, rng)
+    # registration_date = load_date этого батча: каждый батч моделирует
+    # клиентов, зарегистрировавшихся именно сегодня — так же, как
+    # ежедневный пайплайн видит только сегодняшние регистрации. Раньше
+    # дата регистрации сэмплировалась из всей истории с launch_date, но
+    # при инкрементальном бэкафилле (см. backfill_month.sh) окно
+    # сэмплирования растёт с каждым днём, поэтому доля клиентов, чья
+    # регистрация выпадала именно на load_date, стремилась к нулю ближе к
+    # концу периода — искусственный провал вместо роста.
+    registration_dates = _realistic_timestamps([load_date] * count, rng)
     city_weights = np.array(CITY_WEIGHTS, dtype=float)
     city_weights = city_weights / city_weights.sum()
     cities = rng.choice(CITIES, size=count, p=city_weights)
@@ -1112,6 +1189,7 @@ def generate_payments(
     rng: np.random.Generator,
     error_rate: float,
     now: datetime,
+    success_rate: float = PAYMENT_SUCCESS_RATE,
 ) -> tuple[pd.DataFrame, dict[str, int], pd.DataFrame]:
     """
     Сэмплирует `count` попыток оплаты с возвращением из пула заказов в
@@ -1172,7 +1250,7 @@ def generate_payments(
         attempt_at = _uniform_between(earliest, latest, rng)
         payment_method = str(payment_methods[i])
 
-        if success_rolls[i] < PAYMENT_SUCCESS_RATE:
+        if success_rolls[i] < success_rate:
             last = pool.pop()
             if idx < len(pool):
                 pool[idx] = last
@@ -1360,17 +1438,27 @@ def main() -> None:
         for entity in DQ_ENTITIES
     }
 
+    effective_clients_count = resolve_count(args.clients_count, rng, launch_date)
+    effective_orders_count = resolve_count(args.orders_count, rng, launch_date)
+    effective_payments_count = resolve_count(args.payments_count, rng, launch_date)
+
+    effective_payment_success_rate = resolve_payment_success_rate(
+        load_date=load_date,
+        rng=rng,
+        launch_date=launch_date,
+        incident_calendar=incident_calendar,
+    )
+
     existing_clients_df = load_existing_clients(source_root, load_date)
 
     new_clients_df, clients_dq = generate_clients(
         load_date=load_date,
-        count=args.clients_count,
+        count=effective_clients_count,
         rng=rng,
         error_rate=effective_error_rates["clients"],
         existing_client_ids=existing_clients_df["client_id"].dropna().tolist()
         if not existing_clients_df.empty
         else None,
-        launch_date=launch_date,
     )
 
     all_clients_df = _concat_frames(
@@ -1380,7 +1468,7 @@ def main() -> None:
 
     new_orders_df, orders_dq = generate_orders(
         load_date=load_date,
-        count=args.orders_count,
+        count=effective_orders_count,
         clients_df=all_clients_df,
         rng=rng,
         error_rate=effective_error_rates["orders"],
@@ -1420,10 +1508,11 @@ def main() -> None:
     payments_df, payments_dq, paid_orders_df = generate_payments(
         load_date=load_date,
         new_status_orders_df=still_new_pool_df,
-        count=args.payments_count,
+        count=effective_payments_count,
         rng=rng,
         error_rate=effective_error_rates["payments"],
         now=now,
+        success_rate=effective_payment_success_rate,
     )
 
     paid_ids = set(paid_orders_df["order_id"]) if not paid_orders_df.empty else set()
@@ -1471,6 +1560,14 @@ def main() -> None:
             "configured_error_rate": args.error_rate,
             "launch_date": launch_date.isoformat() if launch_date else None,
             "effective_error_rate": effective_error_rates,
+            "configured_clients_count": args.clients_count,
+            "effective_clients_count": effective_clients_count,
+            "configured_orders_count": args.orders_count,
+            "effective_orders_count": effective_orders_count,
+            "configured_payments_count": args.payments_count,
+            "effective_payments_count": effective_payments_count,
+            "configured_payment_success_rate": PAYMENT_SUCCESS_RATE,
+            "effective_payment_success_rate": effective_payment_success_rate,
             "entities": {
                 "clients": {
                     "rows": len(new_clients_df),
