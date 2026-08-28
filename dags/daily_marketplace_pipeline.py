@@ -103,7 +103,7 @@ def daily_marketplace_pipeline():
     @task
     def generate(ds: str) -> None:
         load_date = datetime.fromisoformat(ds)
-        day_index = (load_date - START_DATE).days
+        day_index = (load_date.date() - START_DATE.date()).days
 
         customers_count, orders_count = _volume_for_day(day_index)
 
