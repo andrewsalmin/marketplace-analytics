@@ -25,7 +25,7 @@ customer_id относительно уже обработанной истор�
 """
 import json
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from airflow.decorators import dag, task
@@ -41,7 +41,13 @@ CLICKHOUSE_CONFIG = json.loads(
     (REPO_ROOT / "clickhouse_config.json").read_text(encoding="utf-8")
 )
 
-START_DATE = datetime.fromisoformat(GROWTH_CONFIG["start_date"])
+# tzinfo=utc задан явно: naive datetime Airflow трактовал бы в
+# default_timezone из airflow.cfg конкретного инстанса (обычно utc, но
+# не гарантированно), а расписание ниже (@daily = "0 0 * * *") должно
+# запускаться в 00:00 UTC независимо от конфига инсталляции.
+START_DATE = datetime.fromisoformat(GROWTH_CONFIG["start_date"]).replace(
+    tzinfo=timezone.utc
+)
 RAMP_DAYS = GROWTH_CONFIG["ramp_days"]
 
 
