@@ -11,6 +11,10 @@ services:
       #   export CLICKHOUSE_PASSWORD=...   (bash/zsh)
       #   $env:CLICKHOUSE_PASSWORD = "..." (PowerShell)
       # либо положи в .env рядом с этим файлом (.env — в .gitignore).
+      # USER/DB должны совпадать с clickhouse_config.json (единый
+      # источник правды для load_to_clickhouse.py, run_downstream_pipeline.sh
+      # и Airflow DAG'а) — compose не умеет читать JSON, поэтому синхронизация
+      # только руками при изменении одного из файлов.
       CLICKHOUSE_USER: analytics_user
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD before starting}
       CLICKHOUSE_DB: marketplace_analytics

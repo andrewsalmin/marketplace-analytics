@@ -1,0 +1,6 @@
+{
+  "host": "localhost",
+  "port": 8123,
+  "database": "marketplace_analytics",
+  "user": "analytics_user"
+}

@@ -79,6 +79,11 @@ docker compose up -d clickhouse
 `localhost:8123`, native-протокол для `clickhouse-client` —
 `localhost:9000`). См. `docker-compose.yml`.
 
+Host/port/database/user (без пароля — он нигде в репозитории не
+хранится) — единый источник правды в `clickhouse_config.json`, общий
+для `load_to_clickhouse.py` (дефолты CLI-аргументов),
+`run_downstream_pipeline.sh` и Airflow DAG'а (`dags/daily_marketplace_pipeline.py`).
+
 **3. Сгенерировать историю (source-слой)**
 
 ```bash
@@ -483,6 +488,36 @@ EXISTS`) при каждом запуске, поэтому отдельного
   сущности успешно догружены. Если скрипт упадёт раньше — маркер не
   запишется, и следующий запуск честно догрузит день заново.
 
+### Ежедневный пайплайн в Airflow (`dags/daily_marketplace_pipeline.py`)
+
+`backfill_history.sh` + `run_downstream_pipeline.sh` — для ручного
+бэкафилла истории. `dags/daily_marketplace_pipeline.py` — тот же набор
+шагов (`generate_data.py` -> `ingest_csv_to_raw.py` -> `transform.py` ->
+`load_to_clickhouse.py`), но на регулярном расписании (`@daily`), один
+день (logical_date) за раз, для продакшен-режима.
+
+Бизнес-параметры и объём читаются из того же `growth_config.json`, что
+и `backfill_history.sh` — коэффициенты и кривая роста не расходятся
+между ручным бэкафиллом и ежедневным пайплайном (см. «Реалистичный
+объём» выше). Подключение к ClickHouse — из `clickhouse_config.json`;
+пароль в DAG'е не хранится нигде в репозитории — берётся из Airflow
+Connection `clickhouse_default` (её нужно завести в Admin -> Connections
+перед первым запуском).
+
+`max_active_runs=1`: дни должны идти строго по порядку — `generate_data.py`
+накапливает клиентов между запусками, а `transform.py` проверяет дубли
+`customer_id` относительно уже обработанной истории (см. «Клиенты и
+заказы накапливаются между запусками» выше и комментарий в
+`run_downstream_pipeline.sh`). Это ограничение, не деталь реализации —
+не увеличивать `max_active_runs` и не запускать дни параллельно.
+
+Зависимости DAG'а — отдельно, `requirements-airflow.txt` (Airflow —
+тяжёлая зависимость, не нужна ни генератору, ни Spark-скриптам сама по
+себе). Сами `generate_data.py`/`ingest_csv_to_raw.py`/`transform.py`/
+`load_to_clickhouse.py` DAG вызывает как внешние процессы
+(`subprocess.run`), а не импортирует — воркеру Airflow всё равно
+нужны их зависимости (`requirements-spark.txt` в т.ч.) в PATH.
+
 ## Универсальность архитектуры
 
 Разделение по слоям, что здесь переиспользуемо для любого домена, а
@@ -588,3 +623,6 @@ Python 3.10+. Зависимости — см. `requirements.txt`
 Downstream-скрипты на Spark (`transform.py`, `load_to_clickhouse.py`)
 требуют `requirements-spark.txt` — вынесен отдельно, так как `pyspark`
 тяжёлая зависимость и не нужна для самого генератора.
+Ежедневный Airflow DAG (`dags/daily_marketplace_pipeline.py`) требует
+`requirements-airflow.txt` (по той же причине вынесен отдельно) и
+`requirements-spark.txt` на воркере, где он реально исполняется.

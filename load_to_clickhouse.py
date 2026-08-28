@@ -1,5 +1,6 @@
 import argparse
 import base64
+import json
 import urllib.error
 import urllib.request
 from datetime import date
@@ -21,7 +22,21 @@ PARTITIONED_TABLES = [
 ]
 
 
+def load_clickhouse_defaults() -> dict:
+    """
+    host/port/database/user (без пароля — он никогда не хранится в
+    файле, только как CLI-аргумент/переменная окружения) — единый
+    источник правды в clickhouse_config.json, общий с
+    run_downstream_pipeline.sh и Airflow DAG'ом (daily_marketplace_pipeline),
+    чтобы подключение не расходилось между ручным запуском и пайплайном.
+    """
+    config_path = Path(__file__).parent / "clickhouse_config.json"
+    return json.loads(config_path.read_text(encoding="utf-8"))
+
+
 def parse_args():
+    defaults = load_clickhouse_defaults()
+
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -38,22 +53,22 @@ def parse_args():
 
     parser.add_argument(
         "--clickhouse-host",
-        default="localhost",
+        default=defaults["host"],
     )
 
     parser.add_argument(
         "--clickhouse-port",
-        default="8123",
+        default=str(defaults["port"]),
     )
 
     parser.add_argument(
         "--clickhouse-database",
-        default="marketplace_analytics",
+        default=defaults["database"],
     )
 
     parser.add_argument(
         "--clickhouse-user",
-        default="analytics_user",
+        default=defaults["user"],
     )
 
     parser.add_argument(

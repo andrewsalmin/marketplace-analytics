@@ -29,10 +29,17 @@ DATA_DIR="./data"
 START_DATE="2026-06-01"
 DAYS=92
 
-CLICKHOUSE_HOST="localhost"
-CLICKHOUSE_PORT="8123"
-CLICKHOUSE_DATABASE="marketplace_analytics"
-CLICKHOUSE_USER="analytics_user"
+# host/port/database/user — единый источник правды в
+# clickhouse_config.json, общий с load_to_clickhouse.py (дефолты
+# argparse) и Airflow DAG'ом (daily_marketplace_pipeline). Пароль в
+# этом файле намеренно не хранится — только как CLI-аргумент.
+CLICKHOUSE_CONFIG="$(dirname "$0")/clickhouse_config.json"
+_ch_cfg() { python -c "import json; print(json.load(open('${CLICKHOUSE_CONFIG}'))['$1'])"; }
+
+CLICKHOUSE_HOST=$(_ch_cfg host)
+CLICKHOUSE_PORT=$(_ch_cfg port)
+CLICKHOUSE_DATABASE=$(_ch_cfg database)
+CLICKHOUSE_USER=$(_ch_cfg user)
 CLICKHOUSE_PASSWORD="${1:?Usage: ./run_downstream_pipeline.sh <clickhouse_password> [resume_from_day]}"
 RESUME_FROM_DAY="${2:-1}"  # 1-indexed, как в выводе "(день N/DAYS)"
 
