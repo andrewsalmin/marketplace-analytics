@@ -11,10 +11,10 @@ from pyspark.sql import functions as F
 # Все таблицы, партиционированные по load_date (см. clickhouse_schema.sql) —
 # именно этот список чистится через DROP PARTITION при --force-reload.
 PARTITIONED_TABLES = [
-    "clients",
+    "customers",
     "orders",
     "payments",
-    "quarantine_clients",
+    "quarantine_customers",
     "quarantine_orders",
     "quarantine_payments",
     "dq_metrics",
@@ -177,7 +177,7 @@ def is_load_date_committed(args) -> bool:
 def drop_existing_partitions(args) -> None:
     for table in PARTITIONED_TABLES:
         # IF EXISTS — партиции может не быть вовсе (например, за этот
-        # день quarantine_clients пуст), это не ошибка.
+        # день quarantine_customers пуст), это не ошибка.
         ch_execute(
             args,
             f"ALTER TABLE {table} DROP PARTITION IF EXISTS "
@@ -310,8 +310,8 @@ def main():
         quarantine_root = data_dir / "quarantine"
         dq_root = data_dir / "dq_metrics"
 
-        clients = read_parquet_partition(
-            spark, clean_root, "clients", args.load_date
+        customers = read_parquet_partition(
+            spark, clean_root, "customers", args.load_date
         )
 
         orders = read_parquet_partition(
@@ -323,13 +323,13 @@ def main():
         )
 
         entity_counts = {
-            "clients": write_clickhouse(clients, "clients", args),
+            "customers": write_clickhouse(customers, "customers", args),
             "orders": write_clickhouse(orders, "orders", args),
             "payments": write_clickhouse(payments, "payments", args),
         }
 
-        quarantine_clients = read_parquet_partition(
-            spark, quarantine_root, "clients", args.load_date
+        quarantine_customers = read_parquet_partition(
+            spark, quarantine_root, "customers", args.load_date
         )
 
         quarantine_orders = read_parquet_partition(
@@ -340,9 +340,9 @@ def main():
             spark, quarantine_root, "payments", args.load_date
         )
 
-        entity_counts["quarantine_clients"] = write_clickhouse(
-            quarantine_clients,
-            "quarantine_clients",
+        entity_counts["quarantine_customers"] = write_clickhouse(
+            quarantine_customers,
+            "quarantine_customers",
             args,
         )
         entity_counts["quarantine_orders"] = write_clickhouse(

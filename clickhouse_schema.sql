@@ -7,7 +7,7 @@
 -- --force-reload в load_to_clickhouse.py (DROP PARTITION работает
 -- только если PARTITION BY у реальной таблицы совпадает с этой схемой).
 --
--- Принцип: clients/orders/payments переиздаются построчно по мере
+-- Принцип: customers/orders/payments переиздаются построчно по мере
 -- продвижения state machine (см. README.md, "State machine заказа").
 -- ReplacingMergeTree(ingested_at) разрешает версии по ключу ORDER BY —
 -- SELECT обязан использовать FINAL (или argMax(..., ingested_at)),
@@ -17,9 +17,9 @@
 
 CREATE DATABASE IF NOT EXISTS marketplace_analytics;
 
-CREATE TABLE IF NOT EXISTS marketplace_analytics.clients
+CREATE TABLE IF NOT EXISTS marketplace_analytics.customers
 (
-    client_id           String,
+    customer_id         String,
     registration_date   DateTime,
     city                LowCardinality(String),
     acquisition_channel LowCardinality(String),
@@ -29,12 +29,12 @@ CREATE TABLE IF NOT EXISTS marketplace_analytics.clients
 )
 ENGINE = ReplacingMergeTree(ingested_at)
 PARTITION BY load_date
-ORDER BY (client_id);
+ORDER BY (customer_id);
 
 CREATE TABLE IF NOT EXISTS marketplace_analytics.orders
 (
     order_id            String,
-    client_id           String,
+    customer_id         String,
     created_at          DateTime,
     amount_kopecks      Int64,
     status              LowCardinality(String),
@@ -53,10 +53,10 @@ CREATE TABLE IF NOT EXISTS marketplace_analytics.orders
 ENGINE = ReplacingMergeTree(ingested_at)
 PARTITION BY load_date
 -- Ключ синхронизирован с README.md ("Запросы к ClickHouse: FINAL
--- обязателен") — created_at/client_id у заказа не меняются, order_id
+-- обязателен") — created_at/customer_id у заказа не меняются, order_id
 -- один и тот же для всех переизданий, так что ключ фактически
 -- эквивалентен order_id, но упорядочивает данные по времени создания.
-ORDER BY (created_at, client_id, order_id);
+ORDER BY (created_at, customer_id, order_id);
 
 CREATE TABLE IF NOT EXISTS marketplace_analytics.payments
 (
@@ -76,9 +76,9 @@ PARTITION BY load_date
 -- payment_id разрешает success/refunded версии одного платежа.
 ORDER BY (payment_id);
 
-CREATE TABLE IF NOT EXISTS marketplace_analytics.quarantine_clients
+CREATE TABLE IF NOT EXISTS marketplace_analytics.quarantine_customers
 (
-    client_id            Nullable(String),
+    customer_id           Nullable(String),
     registration_date    Nullable(DateTime),
     city                 LowCardinality(String),
     acquisition_channel  LowCardinality(String),
@@ -89,8 +89,8 @@ CREATE TABLE IF NOT EXISTS marketplace_analytics.quarantine_clients
 )
 ENGINE = MergeTree
 PARTITION BY load_date
-ORDER BY (load_date, client_id)
--- client_id может быть NULL (см. CLIENT_ID_EMPTY в transform.py) и при
+ORDER BY (load_date, customer_id)
+-- customer_id может быть NULL (см. CUSTOMER_ID_EMPTY в transform.py) и при
 -- этом остаётся частью ключа сортировки — ClickHouse требует явного
 -- разрешения на Nullable-колонки в ORDER BY.
 SETTINGS allow_nullable_key = 1;
@@ -98,7 +98,7 @@ SETTINGS allow_nullable_key = 1;
 CREATE TABLE IF NOT EXISTS marketplace_analytics.quarantine_orders
 (
     order_id             String,
-    client_id            Nullable(String),
+    customer_id          Nullable(String),
     created_at           Nullable(DateTime),
     amount_kopecks       Int64,
     status               String,

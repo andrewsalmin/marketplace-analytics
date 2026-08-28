@@ -1,7 +1,7 @@
 [project]
 name = "synthetic-ecommerce-data-generator"
 version = "3.0.0"
-description = "Synthetic clients/orders/payments CSV generator emulating a raw source-system export, with controlled DQ error injection."
+description = "Synthetic customers/orders/payments CSV generator emulating a raw source-system export, with controlled DQ error injection."
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dependencies = [

@@ -191,58 +191,58 @@ def read_raw(spark, raw_root: Path, entity: str, load_date: str):
     )
 
 
-def transform_clients(spark, raw_root, clean_root, quarantine_root, load_date):
-    print("\n--- Processing clients ---")
+def transform_customers(spark, raw_root, clean_root, quarantine_root, load_date):
+    print("\n--- Processing customers ---")
 
-    clients = read_raw(spark, raw_root, "clients", load_date)
+    customers = read_raw(spark, raw_root, "customers", load_date)
 
-    clients = clients.withColumn(
+    customers = customers.withColumn(
         "registration_date",
         F.to_timestamp("registration_date"),
     )
 
-    duplicate_window = Window.partitionBy("client_id")
+    duplicate_window = Window.partitionBy("customer_id")
 
-    clients = clients.withColumn(
+    customers = customers.withColumn(
         "duplicate_count",
         F.count("*").over(duplicate_window),
     )
 
-    historical_client_keys = read_historical_keys(
+    historical_customer_keys = read_historical_keys(
         spark=spark,
         clean_root=clean_root,
-        entity="clients",
-        id_column="client_id",
+        entity="customers",
+        id_column="customer_id",
         load_date=load_date,
     )
 
-    if historical_client_keys is not None:
-        clients = clients.join(
-            historical_client_keys,
-            on="client_id",
+    if historical_customer_keys is not None:
+        customers = customers.join(
+            historical_customer_keys,
+            on="customer_id",
             how="left",
         )
     else:
-        clients = clients.withColumn(
+        customers = customers.withColumn(
             "exists_in_history",
             F.lit(None).cast("boolean"),
         )
 
-    clients = add_dq_reason(
-        clients,
+    customers = add_dq_reason(
+        customers,
         [
             (
-                F.col("client_id").isNull() |
-                (F.trim(F.col("client_id")) == ""),
-                "CLIENT_ID_EMPTY",
+                F.col("customer_id").isNull() |
+                (F.trim(F.col("customer_id")) == ""),
+                "CUSTOMER_ID_EMPTY",
             ),
             (
                 F.col("duplicate_count") > 1,
-                "CLIENT_ID_DUPLICATE_IN_LOAD",
+                "CUSTOMER_ID_DUPLICATE_IN_LOAD",
             ),
             (
                 F.col("exists_in_history").isNotNull(),
-                "CLIENT_ID_DUPLICATE_IN_HISTORY",
+                "CUSTOMER_ID_DUPLICATE_IN_HISTORY",
             ),
             (
                 F.col("registration_date").isNull(),
@@ -254,14 +254,14 @@ def transform_clients(spark, raw_root, clean_root, quarantine_root, load_date):
         "exists_in_history",
     )
 
-    valid_df, invalid_df = split_valid_invalid(clients)
+    valid_df, invalid_df = split_valid_invalid(customers)
 
     valid_count, invalid_count = persist_write_and_count(
         valid_df=valid_df,
         invalid_df=invalid_df,
         clean_root=clean_root,
         quarantine_root=quarantine_root,
-        entity="clients",
+        entity="customers",
         load_date=load_date,
     )
 
@@ -286,18 +286,18 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
         .withColumn("refunded_at", F.to_timestamp("refunded_at"))
     )
 
-    clean_clients = spark.read.parquet(str(clean_root / "clients"))
+    clean_customers = spark.read.parquet(str(clean_root / "customers"))
 
-    client_keys = (
-        clean_clients
-        .select("client_id")
+    customer_keys = (
+        clean_customers
+        .select("customer_id")
         .distinct()
-        .withColumn("client_exists", F.lit(True))
+        .withColumn("customer_exists", F.lit(True))
     )
 
     orders = orders.join(
-        client_keys,
-        on="client_id",
+        customer_keys,
+        on="customer_id",
         how="left",
     )
 
@@ -348,13 +348,13 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
                 "ORDER_ID_DUPLICATE_IN_LOAD",
             ),
             (
-                F.col("client_id").isNull() |
-                (F.trim(F.col("client_id")) == ""),
-                "CLIENT_ID_EMPTY",
+                F.col("customer_id").isNull() |
+                (F.trim(F.col("customer_id")) == ""),
+                "CUSTOMER_ID_EMPTY",
             ),
             (
-                F.col("client_exists").isNull(),
-                "CLIENT_NOT_FOUND",
+                F.col("customer_exists").isNull(),
+                "CUSTOMER_NOT_FOUND",
             ),
             (
                 F.col("created_at").isNull(),
@@ -382,7 +382,7 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
         ],
     ).drop(
         "duplicate_count",
-        "client_exists",
+        "customer_exists",
     )
 
     valid_df, invalid_df = split_valid_invalid(orders)
@@ -534,7 +534,7 @@ def main():
     spark.sparkContext.setLogLevel("WARN")
 
     try:
-        clients_valid, clients_invalid = transform_clients(
+        customers_valid, customers_invalid = transform_customers(
             spark,
             raw_root,
             clean_root,
@@ -561,10 +561,10 @@ def main():
         metrics = [
             {
                 "load_date": args.load_date,
-                "entity": "clients",
-                "valid_rows": clients_valid,
-                "invalid_rows": clients_invalid,
-                "total_rows": clients_valid + clients_invalid,
+                "entity": "customers",
+                "valid_rows": customers_valid,
+                "invalid_rows": customers_invalid,
+                "total_rows": customers_valid + customers_invalid,
             },
             {
                 "load_date": args.load_date,

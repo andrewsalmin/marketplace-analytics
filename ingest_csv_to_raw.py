@@ -6,9 +6,9 @@ from pathlib import Path
 import pandas as pd
 
 ENTITIES = {
-    "clients": {
+    "customers": {
         "string_columns": [
-            "client_id",
+            "customer_id",
             "city",
             "acquisition_channel",
             "email",
@@ -18,7 +18,7 @@ ENTITIES = {
     "orders": {
         "string_columns": [
             "order_id",
-            "client_id",
+            "customer_id",
             "status",
         ],
         "date_columns": ["order_date"],

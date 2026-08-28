@@ -35,7 +35,7 @@ RESUME_FROM_DAY="${1:-1}"  # 1-indexed, как в выводе "(день N/DAYS
 GROWTH_CONFIG="$(dirname "$0")/growth_config.json"
 _cfg() { python -c "import json; print(json.load(open('${GROWTH_CONFIG}'))['$1'])"; }
 
-# Множитель на объём (clients/orders) по дню недели — 1..7, ISO
+# Множитель на объём (customers/orders) по дню недели — 1..7, ISO
 # (1=понедельник, 7=воскресенье, см. `date +%u`), ключ строкой — так и
 # лежит в growth_config.json. Тот же файл читает и Airflow DAG, поэтому
 # сами коэффициенты определены только там, а не захардкожены здесь.
@@ -78,13 +78,13 @@ for i in $(seq 0 $((DAYS - 1))); do
   # Фаза 2 (после): объём фиксируется на уровне конца рампы + медленный
   # органический рост — устоявшийся маркетплейс, а не бесконечное
   # ускорение. Клиенты — новые регистрации ЗА ЭТОТ день (накопление уже
-  # делает сам генератор через load_existing_clients).
+  # делает сам генератор через load_existing_customers).
   if [ "$i" -le "$RAMP_DAYS" ]; then
-    clients_count=$((80 + i * 4))      # 80  -> ~188 к концу рампы
+    customers_count=$((80 + i * 4))      # 80  -> ~188 к концу рампы
     orders_count=$((300 + i * 44))     # 300 -> ~1488 к концу рампы
   else
     plateau_day=$((i - RAMP_DAYS))
-    clients_count=$((80 + RAMP_DAYS * 4 + plateau_day))       # ~188 -> ~242
+    customers_count=$((80 + RAMP_DAYS * 4 + plateau_day))       # ~188 -> ~242
     orders_count=$((300 + RAMP_DAYS * 44 + plateau_day * 5))  # ~1488 -> ~1758
   fi
 
@@ -94,17 +94,17 @@ for i in $(seq 0 $((DAYS - 1))); do
   # generate_data.py (resolve_count(), включается вместе с --launch-date).
   weekday=$(date -d "${load_date}" +%u)
   weekday_multiplier=$(_weekday_multiplier "${weekday}")
-  clients_count=$(_apply_multiplier "${clients_count}" "${weekday_multiplier}")
+  customers_count=$(_apply_multiplier "${customers_count}" "${weekday_multiplier}")
   orders_count=$(_apply_multiplier "${orders_count}" "${weekday_multiplier}")
 
   payments_count=$((orders_count * PAYMENTS_MARGIN_PCT / 100))
 
-  echo "=== ${load_date} (день ${day_number}/${DAYS}): clients=${clients_count} orders=${orders_count} payments=${payments_count} ==="
+  echo "=== ${load_date} (день ${day_number}/${DAYS}): customers=${customers_count} orders=${orders_count} payments=${payments_count} ==="
 
   python generate_data.py \
     --load-date "${load_date}" \
     --data-dir "${DATA_DIR}" \
-    --clients-count "${clients_count}" \
+    --customers-count "${customers_count}" \
     --orders-count "${orders_count}" \
     --payments-count "${payments_count}" \
     --error-rate "${ERROR_RATE}" \

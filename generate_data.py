@@ -71,7 +71,7 @@ CITIES = [
 # платёжеспособный спрос) — без них rng.choice брал бы города
 # равновероятно, что нереалистично: Москва и СПб непропорционально
 # доминируют в e-commerce РФ. Не обязаны суммироваться в 1.0 —
-# нормализуются в generate_clients().
+# нормализуются в generate_customers().
 CITY_WEIGHTS = [
     0.30,   # Москва
     0.14,   # Санкт-Петербург
@@ -118,8 +118,8 @@ PAYMENT_METHODS = ["card", "sbp", "mir_pay", "cash"]
 # apple_pay/google_pay не используются — NFC-платежи недоступны в РФ
 # с 2022, mir_pay — реальная российская NFC-альтернатива
 
-CLIENT_COLUMNS = [
-    "client_id",
+CUSTOMER_COLUMNS = [
+    "customer_id",
     "registration_date",
     "city",
     "acquisition_channel",
@@ -128,7 +128,7 @@ CLIENT_COLUMNS = [
 
 ORDER_COLUMNS = [
     "order_id",
-    "client_id",
+    "customer_id",
     "created_at",
     "amount_kopecks",
     "status",
@@ -197,7 +197,7 @@ PAYMENT_SUCCESS_RATE = 0.95
 # дня перехода внутри окна, не на факт, что он произойдёт.
 DAILY_ADVANCE_PROBABILITY = 0.6
 
-DQ_ENTITIES = ["clients", "orders", "payments"]
+DQ_ENTITIES = ["customers", "orders", "payments"]
 
 # ---------------------------------------------------------------------
 # Реалистичная динамика error_rate (включается флагом --launch-date)
@@ -228,7 +228,7 @@ INCIDENT_DURATION_DAYS_RANGE = (2, 4)
 INCIDENT_MULTIPLIER_RANGE = (3.0, 6.0)
 
 # Мультипликативный день-в-день логнормальный шум для целевого объёма
-# (--clients-count/--orders-count/--payments-count), включается вместе с
+# (--customers-count/--orders-count/--payments-count), включается вместе с
 # --launch-date по тому же принципу, что и ERROR_RATE_NOISE_SIGMA: без
 # него бэкафилл (backfill_month.sh) даёт идеально гладкую детерминированную
 # кривую роста, что визуально не похоже на реальные данные.
@@ -264,7 +264,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--load-date", required=True)
     parser.add_argument("--data-dir", default="data")
-    parser.add_argument("--clients-count", type=int, default=100)
+    parser.add_argument("--customers-count", type=int, default=100)
     parser.add_argument("--orders-count", type=int, default=15_000)
     # Запас над --orders-count (по умолчанию 15000) подобран эмпирически:
     # ~1% оставляет реалистичную долю заказов (~1-2%), не оплаченных в
@@ -292,7 +292,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    for field in ["clients_count", "orders_count", "payments_count"]:
+    for field in ["customers_count", "orders_count", "payments_count"]:
         value = getattr(args, field)
         if value < 0:
             raise ValueError(f"{field} must be >= 0")
@@ -329,10 +329,10 @@ def validate_args(args: argparse.Namespace) -> None:
         if not 0 <= value <= 1:
             raise ValueError(f"--{field.replace('_', '-')} must be between 0 and 1")
 
-    if args.orders_count > 0 and args.clients_count == 0:
+    if args.orders_count > 0 and args.customers_count == 0:
         raise ValueError(
-            "Cannot generate orders when clients-count=0. "
-            "Generate clients first or set orders-count=0."
+            "Cannot generate orders when customers-count=0. "
+            "Generate customers first or set orders-count=0."
         )
 
 
@@ -531,7 +531,7 @@ def resolve_count(
 ) -> int:
     """
     Применяет мультипликативный логнормальный шум к целевому объёму
-    (--clients-count/--orders-count) — сама кривая роста детерминированно
+    (--customers-count/--orders-count) — сама кривая роста детерминированно
     считается в backfill_month.sh, здесь только день-в-день джиттер вокруг
     неё. Без launch_date возвращает base_count как есть (обратная
     совместимость с прямыми вызовами generate_data.py вне бэкафилла).
@@ -547,7 +547,7 @@ def ensure_batch_does_not_exist(source_root: Path, load_date: date) -> None:
     load_date_str = load_date.isoformat()
 
     paths = [
-        source_root / "clients" / f"load_date={load_date_str}",
+        source_root / "customers" / f"load_date={load_date_str}",
         source_root / "orders" / f"load_date={load_date_str}",
         source_root / "payments" / f"load_date={load_date_str}",
         source_root / "_commits" / f"load_date={load_date_str}",
@@ -653,22 +653,22 @@ def _last_milestone_at(row: dict[str, Any]) -> datetime:
     return row["created_at"]
 
 
-def load_existing_clients(source_root: Path, load_date: date) -> pd.DataFrame:
+def load_existing_customers(source_root: Path, load_date: date) -> pd.DataFrame:
     """
     Читает только клиентов с registration_date <= load_date.
 
     Это позволяет использовать ранее созданных клиентов при генерации
     новых заказов и не использовать клиентов из будущих загрузок.
     """
-    clients_root = source_root / "clients"
+    customers_root = source_root / "customers"
 
-    if not clients_root.exists():
-        return pd.DataFrame(columns=CLIENT_COLUMNS)
+    if not customers_root.exists():
+        return pd.DataFrame(columns=CUSTOMER_COLUMNS)
 
-    files = sorted(clients_root.glob("load_date=*/clients.csv"))
+    files = sorted(customers_root.glob("load_date=*/customers.csv"))
 
     if not files:
-        return pd.DataFrame(columns=CLIENT_COLUMNS)
+        return pd.DataFrame(columns=CUSTOMER_COLUMNS)
 
     frames = []
 
@@ -676,14 +676,14 @@ def load_existing_clients(source_root: Path, load_date: date) -> pd.DataFrame:
         df = pd.read_csv(file, parse_dates=["registration_date"])
         frames.append(df)
 
-    clients = _concat_frames(frames, CLIENT_COLUMNS)
-    clients["registration_date"] = pd.to_datetime(clients["registration_date"])
+    customers = _concat_frames(frames, CUSTOMER_COLUMNS)
+    customers["registration_date"] = pd.to_datetime(customers["registration_date"])
 
-    clients = clients[
-        clients["registration_date"] <= pd.Timestamp(load_date) + pd.Timedelta(days=1)
-    ].drop_duplicates("client_id")
+    customers = customers[
+        customers["registration_date"] <= pd.Timestamp(load_date) + pd.Timedelta(days=1)
+    ].drop_duplicates("customer_id")
 
-    return clients.reset_index(drop=True)
+    return customers.reset_index(drop=True)
 
 
 def load_existing_orders(
@@ -744,15 +744,15 @@ def load_existing_orders(
     return combined[open_mask].reset_index(drop=True)
 
 
-def generate_clients(
+def generate_customers(
     load_date: date,
     count: int,
     rng: np.random.Generator,
     error_rate: float = 0.0,
-    existing_client_ids: list[str] | None = None,
+    existing_customer_ids: list[str] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     if count == 0:
-        return pd.DataFrame(columns=CLIENT_COLUMNS), {}
+        return pd.DataFrame(columns=CUSTOMER_COLUMNS), {}
 
     # ru_RU: email строится из русских имён, транслитерированных в
     # латиницу (например Иван Петров -> ivan.petrov@mail.ru), а не из
@@ -775,13 +775,13 @@ def generate_clients(
     channels = rng.choice(ACQUISITION_CHANNELS, size=count, p=ACQUISITION_CHANNEL_WEIGHTS)
     emails = [fake.unique.email() for _ in range(count)]
 
-    client_ids = [f"cl_{load_date:%Y%m%d}_{i + 1:08d}" for i in range(count)]
+    customer_ids = [f"cl_{load_date:%Y%m%d}_{i + 1:08d}" for i in range(count)]
 
     df = pd.DataFrame(
         dict(
             zip(
-                CLIENT_COLUMNS,
-                [client_ids, registration_dates, cities, channels, emails],
+                CUSTOMER_COLUMNS,
+                [customer_ids, registration_dates, cities, channels, emails],
                 strict=True,
             )
         )
@@ -790,12 +790,12 @@ def generate_clients(
     per_type = error_count(total_rows=count, error_rate=error_rate, error_types=4)
 
     expected = {
-        "clients.null_client_id": per_type,
-        "clients.duplicate_client_id_rows": per_type,
-        "clients.duplicate_client_id_in_history": (
-            per_type if existing_client_ids else 0
+        "customers.null_customer_id": per_type,
+        "customers.duplicate_customer_id_rows": per_type,
+        "customers.duplicate_customer_id_in_history": (
+            per_type if existing_customer_ids else 0
         ),
-        "clients.invalid_registration_date": per_type,
+        "customers.invalid_registration_date": per_type,
     }
 
     if per_type == 0:
@@ -815,25 +815,25 @@ def generate_clients(
 
     invalid_reg_idx = indices[cursor:cursor + per_type]
 
-    df.loc[null_id_idx, "client_id"] = None
+    df.loc[null_id_idx, "customer_id"] = None
 
     # Пул-источник для дублирования исключает и dup_in_load_idx (сама
     # цель копирования), и null_id_idx — иначе источником дубля мог бы
-    # случайно стать уже обнулённый client_id, и одна строка попала бы
+    # случайно стать уже обнулённый customer_id, и одна строка попала бы
     # сразу в два разных счётчика DQ.
     source_ids = df.loc[
         df.index.difference(dup_in_load_idx).difference(null_id_idx),
-        "client_id",
+        "customer_id",
     ].sample(
         n=per_type,
         replace=False,
         random_state=int(rng.integers(1, 1_000_000)),
     ).tolist()
-    df.loc[dup_in_load_idx, "client_id"] = source_ids
+    df.loc[dup_in_load_idx, "customer_id"] = source_ids
 
-    if existing_client_ids:
-        reused = rng.choice(existing_client_ids, size=per_type).tolist()
-        df.loc[dup_in_history_idx, "client_id"] = reused
+    if existing_customer_ids:
+        reused = rng.choice(existing_customer_ids, size=per_type).tolist()
+        df.loc[dup_in_history_idx, "customer_id"] = reused
 
     df.loc[invalid_reg_idx, "registration_date"] = pd.NaT
 
@@ -856,7 +856,7 @@ def generate_order_amounts(
 def generate_orders(
     load_date: date,
     count: int,
-    clients_df: pd.DataFrame,
+    customers_df: pd.DataFrame,
     rng: np.random.Generator,
     error_rate: float,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
@@ -868,13 +868,13 @@ def generate_orders(
     if count == 0:
         return pd.DataFrame(columns=ORDER_COLUMNS), {}
 
-    if clients_df.empty:
-        raise ValueError("Cannot generate orders without clients")
+    if customers_df.empty:
+        raise ValueError("Cannot generate orders without customers")
 
-    clients = clients_df.reset_index(drop=True)
+    customers = customers_df.reset_index(drop=True)
 
-    client_idx = rng.integers(0, len(clients), size=count)
-    chosen_clients = clients.iloc[client_idx].reset_index(drop=True)
+    customer_idx = rng.integers(0, len(customers), size=count)
+    chosen_customers = customers.iloc[customer_idx].reset_index(drop=True)
 
     created_at = _realistic_timestamps([load_date] * count, rng)
 
@@ -883,7 +883,7 @@ def generate_orders(
     df = pd.DataFrame(
         {
             "order_id": order_ids,
-            "client_id": chosen_clients["client_id"].tolist(),
+            "customer_id": chosen_customers["customer_id"].tolist(),
             "created_at": created_at,
             "amount_kopecks": generate_order_amounts(count, rng),
             "status": "new",
@@ -902,7 +902,7 @@ def generate_orders(
     per_type = error_count(total_rows=count, error_rate=error_rate, error_types=4)
 
     expected = {
-        "orders.null_client_id": per_type,
+        "orders.null_customer_id": per_type,
         "orders.negative_amount": per_type,
         "orders.invalid_status": per_type,
         "orders.duplicate_order_id_rows": per_type,
@@ -914,7 +914,7 @@ def generate_orders(
     indices = rng.permutation(df.index).tolist()
     cursor = 0
 
-    null_client_idx = indices[cursor:cursor + per_type]
+    null_customer_idx = indices[cursor:cursor + per_type]
     cursor += per_type
 
     negative_amount_idx = indices[cursor:cursor + per_type]
@@ -925,7 +925,7 @@ def generate_orders(
 
     duplicate_idx = indices[cursor:cursor + per_type]
 
-    df.loc[null_client_idx, "client_id"] = None
+    df.loc[null_customer_idx, "customer_id"] = None
     df.loc[negative_amount_idx, "amount_kopecks"] *= -1
     df.loc[invalid_status_idx, "status"] = "unknown_status"
 
@@ -1385,7 +1385,7 @@ def publish_batch(
     moved: list[tuple[Path, Path]] = []  # (target, staging_original)
 
     try:
-        for entity in ["clients", "orders", "payments"]:
+        for entity in ["customers", "orders", "payments"]:
             source_entity_dir = staging_root / entity
             target_entity_dir = (
                 source_root / entity / f"load_date={load_date_str}"
@@ -1438,7 +1438,7 @@ def main() -> None:
         for entity in DQ_ENTITIES
     }
 
-    effective_clients_count = resolve_count(args.clients_count, rng, launch_date)
+    effective_customers_count = resolve_count(args.customers_count, rng, launch_date)
     effective_orders_count = resolve_count(args.orders_count, rng, launch_date)
     effective_payments_count = resolve_count(args.payments_count, rng, launch_date)
 
@@ -1449,27 +1449,27 @@ def main() -> None:
         incident_calendar=incident_calendar,
     )
 
-    existing_clients_df = load_existing_clients(source_root, load_date)
+    existing_customers_df = load_existing_customers(source_root, load_date)
 
-    new_clients_df, clients_dq = generate_clients(
+    new_customers_df, customers_dq = generate_customers(
         load_date=load_date,
-        count=effective_clients_count,
+        count=effective_customers_count,
         rng=rng,
-        error_rate=effective_error_rates["clients"],
-        existing_client_ids=existing_clients_df["client_id"].dropna().tolist()
-        if not existing_clients_df.empty
+        error_rate=effective_error_rates["customers"],
+        existing_customer_ids=existing_customers_df["customer_id"].dropna().tolist()
+        if not existing_customers_df.empty
         else None,
     )
 
-    all_clients_df = _concat_frames(
-        [existing_clients_df, new_clients_df],
-        CLIENT_COLUMNS,
-    ).drop_duplicates("client_id")
+    all_customers_df = _concat_frames(
+        [existing_customers_df, new_customers_df],
+        CUSTOMER_COLUMNS,
+    ).drop_duplicates("customer_id")
 
     new_orders_df, orders_dq = generate_orders(
         load_date=load_date,
         count=effective_orders_count,
-        clients_df=all_clients_df,
+        customers_df=all_customers_df,
         rng=rng,
         error_rate=effective_error_rates["orders"],
     )
@@ -1531,7 +1531,7 @@ def main() -> None:
         PAYMENT_COLUMNS,
     )
 
-    all_dq = {**clients_dq, **orders_dq, **state_machine_dq, **payments_dq}
+    all_dq = {**customers_dq, **orders_dq, **state_machine_dq, **payments_dq}
     skipped_dq_types = [name for name, cnt in all_dq.items() if cnt == 0]
 
     if args.error_rate > 0 and skipped_dq_types:
@@ -1545,7 +1545,7 @@ def main() -> None:
     staging_root = source_root / "_staging" / batch_id
 
     try:
-        clients_file = write_staged_csv(new_clients_df, staging_root, "clients")
+        customers_file = write_staged_csv(new_customers_df, staging_root, "customers")
         orders_file = write_staged_csv(orders_to_write_df, staging_root, "orders")
         payments_file = write_staged_csv(
             payments_to_write_df, staging_root, "payments"
@@ -1560,8 +1560,8 @@ def main() -> None:
             "configured_error_rate": args.error_rate,
             "launch_date": launch_date.isoformat() if launch_date else None,
             "effective_error_rate": effective_error_rates,
-            "configured_clients_count": args.clients_count,
-            "effective_clients_count": effective_clients_count,
+            "configured_customers_count": args.customers_count,
+            "effective_customers_count": effective_customers_count,
             "configured_orders_count": args.orders_count,
             "effective_orders_count": effective_orders_count,
             "configured_payments_count": args.payments_count,
@@ -1569,10 +1569,10 @@ def main() -> None:
             "configured_payment_success_rate": PAYMENT_SUCCESS_RATE,
             "effective_payment_success_rate": effective_payment_success_rate,
             "entities": {
-                "clients": {
-                    "rows": len(new_clients_df),
-                    "file": "clients.csv",
-                    "sha256": sha256_file(clients_file),
+                "customers": {
+                    "rows": len(new_customers_df),
+                    "file": "customers.csv",
+                    "sha256": sha256_file(customers_file),
                 },
                 "orders": {
                     "rows": len(orders_to_write_df),
@@ -1606,7 +1606,7 @@ def main() -> None:
 
     logger.info("Generation completed successfully.")
     logger.info("Load date: %s", load_date)
-    logger.info("Clients:          %s", f"{len(new_clients_df):,}")
+    logger.info("Customers:        %s", f"{len(new_customers_df):,}")
     logger.info("Orders written:   %s", f"{len(orders_to_write_df):,}")
     logger.info("  brand new:      %s", f"{len(new_orders_df):,}")
     logger.info("  advanced:       %s", f"{len(advanced_df):,}")
