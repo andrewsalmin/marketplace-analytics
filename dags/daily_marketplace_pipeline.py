@@ -52,14 +52,30 @@ def _volume_for_day(day_index: int) -> tuple[int, int]:
     фаза 2 — объём фиксируется на уровне конца рампы + медленный
     органический рост. day_index — число дней с start_date (0-indexed),
     как переменная `i` в backfill_history.sh, НЕ 1-indexed day_number.
+    Коэффициенты — из growth_config.json, общие с backfill_history.sh.
     """
+    base_customers = GROWTH_CONFIG["base_customers"]
+    customers_ramp_per_day = GROWTH_CONFIG["customers_ramp_per_day"]
+    customers_plateau_per_day = GROWTH_CONFIG["customers_plateau_per_day"]
+    base_orders = GROWTH_CONFIG["base_orders"]
+    orders_ramp_per_day = GROWTH_CONFIG["orders_ramp_per_day"]
+    orders_plateau_per_day = GROWTH_CONFIG["orders_plateau_per_day"]
+
     if day_index <= RAMP_DAYS:
-        customers_count = 80 + day_index * 4
-        orders_count = 300 + day_index * 44
+        customers_count = base_customers + day_index * customers_ramp_per_day
+        orders_count = base_orders + day_index * orders_ramp_per_day
     else:
         plateau_day = day_index - RAMP_DAYS
-        customers_count = 80 + RAMP_DAYS * 4 + plateau_day
-        orders_count = 300 + RAMP_DAYS * 44 + plateau_day * 5
+        customers_count = (
+            base_customers
+            + RAMP_DAYS * customers_ramp_per_day
+            + plateau_day * customers_plateau_per_day
+        )
+        orders_count = (
+            base_orders
+            + RAMP_DAYS * orders_ramp_per_day
+            + plateau_day * orders_plateau_per_day
+        )
 
     return customers_count, orders_count
 

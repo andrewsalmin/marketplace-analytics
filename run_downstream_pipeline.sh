@@ -26,8 +26,18 @@
 set -euo pipefail
 
 DATA_DIR="./data"
-START_DATE="2026-06-01"
-DAYS=92
+
+# start_date/days — единый источник правды в growth_config.json, общий
+# с backfill_history.sh и Airflow DAG'ом (daily_marketplace_pipeline):
+# этот скрипт должен обработать РОВНО тот же диапазон дат, что backfill
+# сгенерировал, иначе ingest упадёт на дне, для которого нет source-
+# данных (или наоборот — часть сгенерированной истории останется не
+# обработанной).
+GROWTH_CONFIG="$(dirname "$0")/growth_config.json"
+_growth_cfg() { python -c "import json; print(json.load(open('${GROWTH_CONFIG}'))['$1'])"; }
+
+START_DATE=$(_growth_cfg start_date)
+DAYS=$(_growth_cfg days)
 
 # host/port/database/user — единый источник правды в
 # clickhouse_config.json, общий с load_to_clickhouse.py (дефолты

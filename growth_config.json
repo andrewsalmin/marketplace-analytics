@@ -1,6 +1,13 @@
 {
   "start_date": "2026-06-01",
+  "days": 92,
   "ramp_days": 27,
+  "base_customers": 80,
+  "customers_ramp_per_day": 4,
+  "customers_plateau_per_day": 1,
+  "base_orders": 300,
+  "orders_ramp_per_day": 44,
+  "orders_plateau_per_day": 5,
   "weekday_multipliers": {
     "1": 1.0,
     "2": 1.0,

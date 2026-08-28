@@ -24,16 +24,18 @@
 set -euo pipefail
 
 DATA_DIR="./data"
-DAYS=92
 RESUME_FROM_DAY="${1:-1}"  # 1-indexed, как в выводе "(день N/DAYS)"
 
 # Все параметры ниже — единый источник правды в growth_config.json,
-# общий с Airflow DAG'ом (daily_marketplace_pipeline): без этого ручной
-# бэкафилл и ежедневный пайплайн рано или поздно разъедутся по бизнес-
+# общий с run_downstream_pipeline.sh и Airflow DAG'ом
+# (daily_marketplace_pipeline): без этого ручной бэкафилл, догрузка
+# и ежедневный пайплайн рано или поздно разъедутся по датам, бизнес-
 # правилам и объёму. Менять значения — только в growth_config.json,
 # не здесь.
 GROWTH_CONFIG="$(dirname "$0")/growth_config.json"
 _cfg() { python -c "import json; print(json.load(open('${GROWTH_CONFIG}'))['$1'])"; }
+
+DAYS=$(_cfg days)
 
 # Множитель на объём (customers/orders) по дню недели — 1..7, ISO
 # (1=понедельник, 7=воскресенье, см. `date +%u`), ключ строкой — так и
@@ -46,6 +48,15 @@ _apply_multiplier() { python -c "print(round($1 * $2))"; }
 
 START_DATE=$(_cfg start_date)
 RAMP_DAYS=$(_cfg ramp_days)
+
+# --- Коэффициенты формулы кривой роста (см. цикл ниже) — общие с
+# _volume_for_day() в Airflow DAG'е, не меняй по отдельности.
+BASE_CUSTOMERS=$(_cfg base_customers)
+CUSTOMERS_RAMP_PER_DAY=$(_cfg customers_ramp_per_day)
+CUSTOMERS_PLATEAU_PER_DAY=$(_cfg customers_plateau_per_day)
+BASE_ORDERS=$(_cfg base_orders)
+ORDERS_RAMP_PER_DAY=$(_cfg orders_ramp_per_day)
+ORDERS_PLATEAU_PER_DAY=$(_cfg orders_plateau_per_day)
 
 # --- Политика бизнеса: постоянна весь месяц, НЕ часть кривой роста ---
 PAYMENT_DEADLINE_HOURS=$(_cfg payment_deadline_hours)
@@ -80,12 +91,12 @@ for i in $(seq 0 $((DAYS - 1))); do
   # ускорение. Клиенты — новые регистрации ЗА ЭТОТ день (накопление уже
   # делает сам генератор через load_existing_customers).
   if [ "$i" -le "$RAMP_DAYS" ]; then
-    customers_count=$((80 + i * 4))      # 80  -> ~188 к концу рампы
-    orders_count=$((300 + i * 44))     # 300 -> ~1488 к концу рампы
+    customers_count=$((BASE_CUSTOMERS + i * CUSTOMERS_RAMP_PER_DAY))
+    orders_count=$((BASE_ORDERS + i * ORDERS_RAMP_PER_DAY))
   else
     plateau_day=$((i - RAMP_DAYS))
-    customers_count=$((80 + RAMP_DAYS * 4 + plateau_day))       # ~188 -> ~242
-    orders_count=$((300 + RAMP_DAYS * 44 + plateau_day * 5))  # ~1488 -> ~1758
+    customers_count=$((BASE_CUSTOMERS + RAMP_DAYS * CUSTOMERS_RAMP_PER_DAY + plateau_day * CUSTOMERS_PLATEAU_PER_DAY))
+    orders_count=$((BASE_ORDERS + RAMP_DAYS * ORDERS_RAMP_PER_DAY + plateau_day * ORDERS_PLATEAU_PER_DAY))
   fi
 
   # Недельная сезонность поверх кривой роста — будни/выходные не
