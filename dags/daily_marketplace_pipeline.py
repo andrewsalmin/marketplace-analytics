@@ -94,7 +94,7 @@ def _run(args: list[str]) -> None:
     dag_id="daily_marketplace_pipeline",
     schedule="@daily",
     start_date=START_DATE,
-    catchup=True,
+    catchup=False,
     max_active_runs=1,
     tags=["marketplace"],
 )
