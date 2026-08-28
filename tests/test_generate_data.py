@@ -432,7 +432,7 @@ class TestGenerateCustomers:
 
     def test_duplicate_in_history_reuses_existing_id(self):
         rng = gd.make_rng(date(2026, 1, 1))
-        existing_ids = [f"cl_existing_{i:03d}" for i in range(10)]
+        existing_ids = [f"cus_existing_{i:03d}" for i in range(10)]
         df, dq = gd.generate_customers(
             load_date=date(2026, 1, 1),
             count=1000,
@@ -465,7 +465,7 @@ class TestGenerateCustomers:
 def sample_customers() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "customer_id": [f"cl_test_{i:03d}" for i in range(20)],
+            "customer_id": [f"cus_test_{i:03d}" for i in range(20)],
             "registration_date": [datetime(2026, 1, 1)] * 20,
             "city": ["Москва"] * 20,
             "acquisition_channel": ["organic"] * 20,
@@ -563,7 +563,7 @@ def sample_new_orders() -> pd.DataFrame:
     rng = gd.make_rng(date(2026, 3, 1))
     customers = pd.DataFrame(
         {
-            "customer_id": [f"cl_test_{i:03d}" for i in range(30)],
+            "customer_id": [f"cus_test_{i:03d}" for i in range(30)],
             "registration_date": [datetime(2026, 1, 1)] * 30,
             "city": ["Москва"] * 30,
             "acquisition_channel": ["organic"] * 30,
@@ -716,7 +716,7 @@ class TestGeneratePayments:
 def _base_order(**overrides) -> dict:
     row = {
         "order_id": "ord_test_00000001",
-        "customer_id": "cl_test_001",
+        "customer_id": "cus_test_001",
         "created_at": datetime(2026, 5, 1, 10, 0, 0),
         "amount_kopecks": 5000,
         "status": "new",
@@ -930,7 +930,7 @@ class TestAdvanceOpenOrders:
 
 ORDER_CSV_TEMPLATE = {
     "order_id": "ord_x",
-    "customer_id": "cl_1",
+    "customer_id": "cus_1",
     "created_at": "2026-04-01 10:00:00",
     "amount_kopecks": 1000,
     "status": "new",

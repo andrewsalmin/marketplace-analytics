@@ -775,7 +775,7 @@ def generate_customers(
     channels = rng.choice(ACQUISITION_CHANNELS, size=count, p=ACQUISITION_CHANNEL_WEIGHTS)
     emails = [fake.unique.email() for _ in range(count)]
 
-    customer_ids = [f"cl_{load_date:%Y%m%d}_{i + 1:08d}" for i in range(count)]
+    customer_ids = [f"cus_{load_date:%Y%m%d}_{i + 1:08d}" for i in range(count)]
 
     df = pd.DataFrame(
         dict(
