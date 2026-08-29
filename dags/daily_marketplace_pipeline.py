@@ -34,6 +34,13 @@ from airflow.hooks.base import BaseHook
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = str(REPO_ROOT / "data")
 
+# Явный путь до venv проекта, а не просто "python": subprocess.run ниже
+# резолвит "python" через PATH процесса Airflow-воркера, а тот запущен
+# из отдельного airflow-venv (только requirements-airflow.txt, без
+# pandas и прочего из requirements-spark.txt), поэтому голое "python"
+# там резолвится не в то окружение и падает с ImportError.
+PYTHON_BIN = str(REPO_ROOT / "venv" / "bin" / "python")
+
 GROWTH_CONFIG = json.loads(
     (REPO_ROOT / "growth_config.json").read_text(encoding="utf-8")
 )
@@ -121,7 +128,7 @@ def daily_marketplace_pipeline():
         )
 
         _run([
-            "python", "generate_data.py",
+            PYTHON_BIN, "generate_data.py",
             "--load-date", ds,
             "--data-dir", DATA_DIR,
             "--customers-count", str(customers_count),
@@ -143,7 +150,7 @@ def daily_marketplace_pipeline():
     @task
     def ingest(ds: str) -> None:
         _run([
-            "python", "ingest_csv_to_raw.py",
+            PYTHON_BIN, "ingest_csv_to_raw.py",
             "--load-date", ds,
             "--data-dir", DATA_DIR,
         ])
@@ -151,7 +158,7 @@ def daily_marketplace_pipeline():
     @task
     def transform(ds: str) -> None:
         _run([
-            "python", "transform.py",
+            PYTHON_BIN, "transform.py",
             "--load-date", ds,
             "--data-dir", DATA_DIR,
         ])
@@ -164,7 +171,7 @@ def daily_marketplace_pipeline():
         password = BaseHook.get_connection("clickhouse_default").password
 
         _run([
-            "python", "load_to_clickhouse.py",
+            PYTHON_BIN, "load_to_clickhouse.py",
             "--load-date", ds,
             "--data-dir", DATA_DIR,
             "--clickhouse-host", CLICKHOUSE_CONFIG["host"],
