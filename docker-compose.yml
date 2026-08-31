@@ -3,18 +3,12 @@ services:
     image: clickhouse/clickhouse-server:24.8
     container_name: analytics-clickhouse
     ports:
-      - "8123:8123" # HTTP-интерфейс — то, чем пользуется load_to_clickhouse.py
-      - "9000:9000" # native-протокол — для clickhouse-client
+      - "8123:8123" # HTTP-интерфейс
+      - "9000:9000" # native-протокол
     environment:
-      # Обязателен явно — без значения по умолчанию, чтобы пароль не
-      # осел в этом файле. Задай перед запуском:
-      #   export CLICKHOUSE_PASSWORD=...   (bash/zsh)
-      #   $env:CLICKHOUSE_PASSWORD = "..." (PowerShell)
-      # либо положи в .env рядом с этим файлом (.env — в .gitignore).
-      # USER/DB должны совпадать с clickhouse_config.json (единый
-      # источник правды для load_to_clickhouse.py, run_downstream_pipeline.sh
-      # и Airflow DAG'а) — compose не умеет читать JSON, поэтому синхронизация
-      # только руками при изменении одного из файлов.
+      # Без дефолта, чтобы пароль не осел в файле. Задай перед запуском
+      # (export/$env: CLICKHOUSE_PASSWORD) или положи в .env.
+      # USER/DB должны совпадать с clickhouse_config.json — синхронизируй руками.
       CLICKHOUSE_USER: analytics_user
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD before starting}
       CLICKHOUSE_DB: marketplace_analytics

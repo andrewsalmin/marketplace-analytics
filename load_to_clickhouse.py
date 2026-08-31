@@ -25,7 +25,7 @@ PARTITIONED_TABLES = [
 def load_clickhouse_defaults() -> dict:
     """
     host/port/database/user (без пароля — он никогда не хранится в
-    файле, только как CLI-аргумент/переменная окружения) — единый
+    файле, передаётся только аргументом --clickhouse-password) — единый
     источник правды в clickhouse_config.json, общий с
     run_downstream_pipeline.sh и Airflow DAG'ом (daily_marketplace_pipeline),
     чтобы подключение не расходилось между ручным запуском и пайплайном.
