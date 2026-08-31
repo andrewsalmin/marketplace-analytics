@@ -17,9 +17,7 @@ VALID_ORDER_STATUSES = [
     "returned",
     "refunded",
 ]
-# pending/chargeback убраны — синхронизировано с generate_data.py: обе
-# ветки были мёртвым кодом в генераторе, ни одна попытка оплаты их не
-# производит.
+
 VALID_PAYMENT_STATUSES = ["success", "failed", "refunded"]
 
 

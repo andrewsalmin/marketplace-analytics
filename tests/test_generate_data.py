@@ -301,9 +301,8 @@ class TestValidateArgs:
         )
 
     def test_payments_without_orders_now_allowed(self):
-        # Раньше это было отклонено, но теперь payments могут ссылаться на
-        # ОТКРЫТЫЕ заказы из истории, даже если orders-count=0 в этом
-        # конкретном прогоне — проверка больше не актуальна.
+        # payments могут ссылаться на ОТКРЫТЫЕ заказы из истории, даже
+        # если orders-count=0 в этом конкретном прогоне.
         gd.validate_args(self._args(orders_count=0, payments_count=100))
 
     @pytest.mark.parametrize(
