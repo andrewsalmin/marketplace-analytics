@@ -1,19 +1,11 @@
--- Схема ClickHouse для analytics-платформы.
+-- Схема ClickHouse для analytics-платформы — единственный источник
+-- истины (сверяй с кластером перед --force-reload в load_to_clickhouse.py,
+-- т.к. DROP PARTITION требует совпадения PARTITION BY).
 --
--- Раньше эта схема нигде не версионировалась — таблицы существовали
--- только в живом кластере, не в репозитории. Этот файл — единственный
--- источник истины: применяй его целиком на пустой базе, либо сверяй
--- вручную с уже развёрнутыми таблицами перед тем, как полагаться на
--- --force-reload в load_to_clickhouse.py (DROP PARTITION работает
--- только если PARTITION BY у реальной таблицы совпадает с этой схемой).
---
--- Принцип: customers/orders/payments переиздаются построчно по мере
--- продвижения state machine (см. README.md, "State machine заказа").
--- ReplacingMergeTree(ingested_at) разрешает версии по ключу ORDER BY —
--- SELECT обязан использовать FINAL (или argMax(..., ingested_at)),
--- иначе между вставкой и фоновым мерджем в таблице будут физически
--- лежать сразу все версии строки. quarantine_*/dq_metrics не
--- переиздаются — обычный MergeTree.
+-- customers/orders/payments переиздаются по мере продвижения state
+-- machine (см. README.md) через ReplacingMergeTree(ingested_at) —
+-- поэтому SELECT обязан использовать FINAL или argMax(..., ingested_at).
+-- quarantine_*/dq_metrics — обычный MergeTree, не переиздаются.
 
 CREATE DATABASE IF NOT EXISTS marketplace_analytics;
 
