@@ -6,9 +6,9 @@ services:
       - "8123:8123" # HTTP-интерфейс
       - "9000:9000" # native-протокол
     environment:
-      # Без дефолта, чтобы пароль не осел в файле. Задай перед запуском
-      # (export/$env: CLICKHOUSE_PASSWORD) или положи в .env.
-      # USER/DB должны совпадать с clickhouse_config.json — синхронизируй руками.
+      # Без дефолта, чтобы пароль не осел в файле. Устанавливается перед
+      # запуском (export/$env: CLICKHOUSE_PASSWORD) или через .env.
+      # USER/DB должны совпадать с clickhouse_config.json — синхронизация вручную.
       CLICKHOUSE_USER: analytics_user
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD before starting}
       CLICKHOUSE_DB: marketplace_analytics
