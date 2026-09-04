@@ -1,4 +1,11 @@
+"""DQ-слой на Spark: raw-партиция -> clean / quarantine + dq_metrics.
+
+Каждая строка проходит набор проверок; провалившие уходят в quarantine
+с полем dq_reason, остальные — в clean. Оба слоя пересчитываемые:
+повторный запуск за ту же дату перезаписывает её партицию.
+"""
 import argparse
+import logging
 from datetime import date
 from pathlib import Path
 
@@ -6,6 +13,8 @@ from pyspark import StorageLevel
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+
+logger = logging.getLogger(__name__)
 
 VALID_ORDER_STATUSES = [
     "new",
@@ -21,7 +30,7 @@ VALID_ORDER_STATUSES = [
 VALID_PAYMENT_STATUSES = ["success", "failed", "refunded"]
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -47,12 +56,10 @@ def parse_args():
 
 
 def add_dq_reason(df, checks):
-    """
-    checks: список пар вида:
-    (условие ошибки Spark Column, текст причины)
+    """Добавляет поле dq_reason по списку проверок.
 
-    Создаёт поле dq_reason.
-    Если строка валидна, dq_reason будет пустой строкой.
+    checks — пары (условие ошибки как Spark Column, текст причины).
+    У валидной строки dq_reason остаётся пустой строкой.
     """
     reason_columns = [
         F.when(condition, F.lit(reason))
@@ -84,10 +91,10 @@ def write_layer(
     entity: str,
     load_date: str,
     row_count: int,
-):
-    """
-    Clean и quarantine — пересчитываемые слои.
-    Перезаписывается только конкретная партиция load_date.
+) -> None:
+    """Пишет партицию пересчитываемого слоя (clean или quarantine).
+
+    Перезаписывается только партиция за конкретный load_date.
     """
 
     target_path = root / entity / f"load_date={load_date}"
@@ -99,7 +106,9 @@ def write_layer(
         .parquet(str(target_path))
     )
 
-    print(f"[WRITE] {entity}: {row_count:,} rows -> {target_path}")
+    logger.info(
+        "[WRITE] %s: %s rows -> %s", entity, f"{row_count:,}", target_path
+    )
 
 
 def persist_write_and_count(
@@ -110,9 +119,10 @@ def persist_write_and_count(
     entity: str,
     load_date: str,
 ):
-    """
-    Кэширует результаты DQ-проверок, считает строки один раз
-    и записывает clean/quarantine без повторного пересчёта.
+    """Кэширует результаты DQ-проверок и пишет оба слоя за один проход.
+
+    Строки считаются один раз, clean/quarantine записываются без
+    повторного пересчёта плана.
     """
 
     valid_df = valid_df.persist(StorageLevel.MEMORY_AND_DISK)
@@ -152,12 +162,10 @@ def read_historical_keys(
     id_column: str,
     load_date: str,
 ):
-    """
-    Возвращает ID из clean-слоя всех загрузок, кроме текущей.
+    """Возвращает ID из clean-слоя всех загрузок, кроме текущей.
 
-    Это позволяет:
-    - находить дубликаты относительно прошлых загрузок;
-    - безопасно повторно запускать transform для той же даты.
+    Это позволяет находить дубликаты относительно прошлых загрузок и
+    безопасно перезапускать transform для той же даты.
     """
 
     entity_root = clean_root / entity
@@ -190,7 +198,7 @@ def read_raw(spark, raw_root: Path, entity: str, load_date: str):
 
 
 def transform_customers(spark, raw_root, clean_root, quarantine_root, load_date):
-    print("\n--- Processing customers ---")
+    logger.info("--- Processing customers ---")
 
     customers = read_raw(spark, raw_root, "customers", load_date)
 
@@ -254,7 +262,7 @@ def transform_customers(spark, raw_root, clean_root, quarantine_root, load_date)
 
     valid_df, invalid_df = split_valid_invalid(customers)
 
-    valid_count, invalid_count = persist_write_and_count(
+    return persist_write_and_count(
         valid_df=valid_df,
         invalid_df=invalid_df,
         clean_root=clean_root,
@@ -263,11 +271,9 @@ def transform_customers(spark, raw_root, clean_root, quarantine_root, load_date)
         load_date=load_date,
     )
 
-    return valid_count, invalid_count
-
 
 def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
-    print("\n--- Processing orders ---")
+    logger.info("--- Processing orders ---")
 
     orders = read_raw(spark, raw_root, "orders", load_date)
 
@@ -299,13 +305,11 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
         how="left",
     )
 
-    # ORDER_ID_DUPLICATE_IN_HISTORY больше не проверяется: заказ теперь
-    # легитимно переиздаётся строкой с тем же order_id при каждом
-    # изменении статуса (upsert-модель, ReplacingMergeTree в ClickHouse
-    # сам разрешает версии по ingested_at) — повторный order_id в истории
-    # больше не ошибка. Дубликат В ПРЕДЕЛАХ ОДНОГО батча (duplicate_count)
-    # остаётся ошибкой — это по-прежнему один и тот же снапшот, две строки
-    # с одним order_id в нём означают DQ-проблему источника.
+    # Дубликат order_id проверяется только В ПРЕДЕЛАХ ОДНОГО батча:
+    # заказ легитимно переиздаётся с тем же order_id при каждой смене
+    # статуса (upsert-модель, версии разрешает ReplacingMergeTree по
+    # ingested_at). А вот две строки с одним order_id внутри одного
+    # снапшота — DQ-проблема источника.
     duplicate_window = Window.partitionBy("order_id")
 
     orders = orders.withColumn(
@@ -396,7 +400,7 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
 
 
 def transform_payments(spark, raw_root, clean_root, quarantine_root, load_date):
-    print("\n--- Processing payments ---")
+    logger.info("--- Processing payments ---")
 
     payments = read_raw(spark, raw_root, "payments", load_date)
 
@@ -424,10 +428,9 @@ def transform_payments(spark, raw_root, clean_root, quarantine_root, load_date):
         how="left",
     )
 
-    # PAYMENT_ID_DUPLICATE_IN_HISTORY больше не проверяется: платёж,
-    # ставший refunded, легитимно переиздаётся с тем же payment_id
-    # (pay_{order_id}), сформированным детерминированно из order_id —
-    # это тот же upsert-паттерн, что и у orders.
+    # Как и у orders, дубликат проверяется только внутри батча: платёж,
+    # ставший refunded, переиздаётся с тем же payment_id (pay_{order_id},
+    # детерминированный от order_id).
     duplicate_window = Window.partitionBy("payment_id")
 
     payments = payments.withColumn(
@@ -498,7 +501,7 @@ def transform_payments(spark, raw_root, clean_root, quarantine_root, load_date):
     )
 
 
-def write_dq_metrics(spark, metrics, dq_root: Path, load_date: str):
+def write_dq_metrics(spark, metrics, dq_root: Path, load_date: str) -> None:
     metrics_df = spark.createDataFrame(metrics)
 
     target_path = dq_root / f"load_date={load_date}"
@@ -510,10 +513,10 @@ def write_dq_metrics(spark, metrics, dq_root: Path, load_date: str):
         .parquet(str(target_path))
     )
 
-    print(f"\n[DQ] Metrics saved -> {target_path}")
+    logger.info("[DQ] Metrics saved -> %s", target_path)
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     data_dir = Path(args.data_dir)
@@ -587,11 +590,12 @@ def main():
             load_date=args.load_date,
         )
 
-        print("\nSpark transformation completed successfully.")
+        logger.info("Spark transformation completed successfully.")
 
     finally:
         spark.stop()
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     main()

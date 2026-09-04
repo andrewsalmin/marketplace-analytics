@@ -1,9 +1,17 @@
+"""Ingest source-слоя: CSV-выгрузка источника -> Parquet-партиции raw.
+
+Слой ничего не чинит и ничего не фильтрует: DQ-ошибки, внесённые
+generate_data.py, должны дойти до transform.py в неизменном виде.
+"""
 import argparse
 import json
+import logging
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 ENTITIES = {
     "customers": {
@@ -35,7 +43,7 @@ ENTITIES = {
 }
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -53,7 +61,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def ensure_not_exists(path: Path, layer_name: str):
+def ensure_not_exists(path: Path, layer_name: str) -> None:
     if path.exists():
         raise FileExistsError(
             f"{layer_name}-партиция уже существует: {path}\n"
@@ -99,7 +107,7 @@ def write_raw_parquet(
     raw_root: Path,
     entity: str,
     load_date: date,
-):
+) -> None:
     partition_dir = raw_root / entity / f"load_date={load_date.isoformat()}"
     ensure_not_exists(partition_dir, "Raw")
 
@@ -117,14 +125,14 @@ def write_raw_parquet(
 
     temp_file.rename(target_file)
 
-    print(f"[RAW] Saved {len(df):,} rows -> {target_file}")
+    logger.info("[RAW] Saved %s rows -> %s", f"{len(df):,}", target_file)
 
 
 def save_ingest_manifest(
     raw_root: Path,
     load_date: date,
     results: dict,
-):
+) -> None:
     manifest_dir = raw_root / "_manifests" / f"load_date={load_date.isoformat()}"
     manifest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -143,7 +151,7 @@ def save_ingest_manifest(
         json.dump(manifest, file, ensure_ascii=False, indent=2)
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     load_date = date.fromisoformat(args.load_date)
@@ -187,8 +195,9 @@ def main():
         results=results,
     )
 
-    print("\nCSV ingestion completed successfully.")
+    logger.info("CSV ingestion completed successfully.")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     main()
