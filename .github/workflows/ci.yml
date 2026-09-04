@@ -8,6 +8,7 @@ on:
 
 jobs:
   test:
+    name: Линтер и тесты генератора
     runs-on: ubuntu-latest
 
     steps:
@@ -19,11 +20,42 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+      # --require-hashes: ставится ровно то, что записано в lock-файле.
+      # Прогон CI не зависит от того, что вышло на PyPI со вчера.
+      - name: Install pinned dependencies
+        run: pip install --require-hashes -r requirements-dev.lock
 
       - name: Lint (ruff)
         run: ruff check .
 
+      # Тесты DQ-правил здесь пропускаются: pyspark в этот job не ставится
+      # (см. job dq-rules), а tests/test_transform_dq.py начинается с
+      # pytest.importorskip("pyspark").
       - name: Run tests
         run: pytest -v
+
+  dq-rules:
+    name: DQ-правила на Spark
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Spark 3.5 требует JVM; на раннере она есть не всегда нужной версии.
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install pinned dependencies with Spark
+        run: pip install --require-hashes -r requirements-spark.lock
+
+      - name: Run DQ rule tests
+        run: pytest tests/test_transform_dq.py -v

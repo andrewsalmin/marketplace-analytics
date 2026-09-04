@@ -183,7 +183,7 @@ Superset, а не в этом репозитории; `superset/apply_review_fix
 | `growth_config.json` | Бизнес-параметры: диапазон дат, кривая роста, дедлайны, вероятности |
 | `clickhouse_config.json` | Параметры подключения к ClickHouse (без пароля) |
 | `superset/` | Приведение дашборда в Superset к целевому состоянию |
-| `tests/` | Тесты генератора (`pytest`) |
+| `tests/` | Тесты генератора и DQ-правил (`pytest`) |
 
 ## Архитектура
 
@@ -774,19 +774,69 @@ pip install -r requirements-dev.txt
 pytest -v
 ```
 
-Тесты сфокусированы на местах, которые реально ломались в процессе
-разработки: граничные случаи `error_count`, откат `publish_batch`
-при сбое посреди публикации, state machine заказа
-(`advance_open_orders`, дедлайны, причины отмены), и валидация
-аргументов CLI.
+Два набора, разделённые по весу зависимостей.
+
+**Генератор** (`tests/test_generate_data.py`) — граничные случаи
+`error_count`, откат `publish_batch` при сбое посреди публикации, state
+machine заказа (`advance_open_orders`, дедлайны, причины отмены),
+валидация аргументов CLI.
+
+**DQ-правила** (`tests/test_transform_dq.py`) — каждая проверка
+`transform.py` в изоляции: берётся заведомо валидная строка, меняется
+ровно одно поле, проверяется состав `dq_reason`. Правила вынесены из
+`transform_*` в `customer_dq_checks()` / `order_dq_checks()` /
+`payment_dq_checks()` именно для этого — они не трогают ни файлы, ни
+партиции, поэтому проверяются на однострочном DataFrame без всякой
+инфраструктуры.
+
+Второй набор требует `pyspark` и JVM; без них файл пропускается
+(`pytest.importorskip`), чтобы прогон тестов генератора не тянул
+тяжёлую зависимость:
+
+```bash
+pip install -r requirements-spark.txt
+pytest tests/test_transform_dq.py -v
+```
+
+В CI это отдельный job (`dq-rules`) с установкой Java 17.
 
 ## Требования к окружению
 
-Python 3.10+. Зависимости — см. `requirements.txt`
-(`requirements-dev.txt` дополнительно для тестов и линтера).
-Downstream-скрипты на Spark (`transform.py`, `load_to_clickhouse.py`)
-требуют `requirements-spark.txt` — вынесен отдельно, так как `pyspark`
-тяжёлая зависимость и не нужна для самого генератора.
-Ежедневный Airflow DAG (`dags/daily_marketplace_pipeline.py`) требует
-`requirements-airflow.txt` (по той же причине вынесен отдельно) и
-`requirements-spark.txt` на воркере, где он реально исполняется.
+Python 3.10+ и, для Spark-слоя, JVM 17.
+
+Зависимости описаны в двух формах. `requirements*.txt` — входные
+файлы с широкими диапазонами, их правят руками:
+
+| Файл | Для чего |
+| --- | --- |
+| `requirements.txt` | Генератор и ingest |
+| `requirements-dev.txt` | То же + `pytest`/`ruff` |
+| `requirements-spark.txt` | То же + `pyspark` для `transform.py` и `load_to_clickhouse.py` |
+| `requirements-airflow.txt` | То же + `apache-airflow` для DAG'а |
+
+`requirements*.lock` — результат их компиляции: точные версии всего
+дерева зависимостей вместе с хешами. Их не редактируют руками, их
+пересобирают:
+
+```bash
+pip install pip-tools
+pip-compile --generate-hashes --strip-extras --output-file=requirements.lock requirements.txt
+pip-compile --generate-hashes --strip-extras --output-file=requirements-dev.lock requirements-dev.txt
+pip-compile --generate-hashes --strip-extras --output-file=requirements-spark.lock requirements-dev.txt requirements-spark.txt
+```
+
+Ставятся они с `--require-hashes`, и так это делает CI:
+
+```bash
+pip install --require-hashes -r requirements-dev.lock
+```
+
+Смысл разделения: разработчик читает и правит `.txt`, а CI и прод
+ставят `.lock` и получают ровно тот же набор версий, что и вчера, —
+иначе свежий релиз транзитивной зависимости роняет сборку без единого
+коммита в репозиторий.
+
+Airflow намеренно оставлен без lock-файла: его дерево зависимостей
+огромно, жёстко завязано на версию Python и на констрейнты самого
+Airflow, и разрешается на стороне той установки, куда DAG кладётся, —
+пиннинг здесь дал бы ложную воспроизводимость, а не настоящую.
