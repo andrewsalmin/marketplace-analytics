@@ -70,6 +70,7 @@ REFUND_PROCESSING_HOURS=$(_cfg refund_processing_hours)
 CANCEL_BEFORE_PAYMENT_RATE=$(_cfg cancel_before_payment_rate)
 CANCEL_AFTER_PAYMENT_RATE=$(_cfg cancel_after_payment_rate)
 RETURN_RATE=$(_cfg return_rate)
+NEVER_ORDER_RATE=$(_cfg never_order_rate)
 ERROR_RATE=$(_cfg error_rate)
 
 # --- Запас попыток оплаты над числом заказов: подобран эмпирически на
@@ -130,5 +131,6 @@ for i in $(seq 0 $((DAYS - 1))); do
     --refund-processing-hours "${REFUND_PROCESSING_HOURS}" \
     --cancel-before-payment-rate "${CANCEL_BEFORE_PAYMENT_RATE}" \
     --cancel-after-payment-rate "${CANCEL_AFTER_PAYMENT_RATE}" \
-    --return-rate "${RETURN_RATE}"
+    --return-rate "${RETURN_RATE}" \
+    --never-order-rate "${NEVER_ORDER_RATE}"
 done

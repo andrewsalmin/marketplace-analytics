@@ -145,6 +145,7 @@ def daily_marketplace_pipeline():
             "--cancel-before-payment-rate", str(GROWTH_CONFIG["cancel_before_payment_rate"]),
             "--cancel-after-payment-rate", str(GROWTH_CONFIG["cancel_after_payment_rate"]),
             "--return-rate", str(GROWTH_CONFIG["return_rate"]),
+            "--never-order-rate", str(GROWTH_CONFIG["never_order_rate"]),
         ])
 
     @task

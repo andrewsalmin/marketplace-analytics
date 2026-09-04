@@ -14,6 +14,7 @@ import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -241,6 +242,150 @@ class TestResolvePaymentSuccessRate:
 
 
 # ---------------------------------------------------------------------
+# Календарь дней особого объёма: праздники/зарплата/промо, load stress
+# ---------------------------------------------------------------------
+
+
+class TestPublicHoliday:
+    def test_fixed_date_on_weekday_is_holiday(self):
+        assert gd._is_public_holiday(date(2026, 2, 23))  # понедельник
+
+    def test_day_before_holiday_is_not_holiday(self):
+        assert not gd._is_public_holiday(date(2026, 2, 22))
+
+    def test_holiday_on_sunday_shifts_to_next_weekday(self):
+        assert date(2026, 3, 8).weekday() == 6  # воскресенье
+        assert gd._is_public_holiday(date(2026, 3, 8))
+        assert gd._is_public_holiday(date(2026, 3, 9))  # перенос на понедельник
+
+    def test_holiday_on_saturday_shifts_past_sunday_to_monday(self):
+        assert date(2026, 5, 9).weekday() == 5  # суббота
+        assert gd._is_public_holiday(date(2026, 5, 9))
+        # воскресенье — выходной само по себе, но не день переноса
+        assert not gd._is_public_holiday(date(2026, 5, 10))
+        assert gd._is_public_holiday(date(2026, 5, 11))  # перенос на понедельник
+
+    def test_works_for_future_years_without_maintenance(self):
+        assert gd._is_public_holiday(date(2028, 11, 4))  # суббота
+        assert gd._is_public_holiday(date(2028, 11, 6))  # перенос на понедельник
+
+
+class TestPayday:
+    def test_5th_and_20th_are_paydays(self):
+        assert gd._is_payday(date(2026, 6, 5))
+        assert gd._is_payday(date(2026, 6, 20))
+
+    def test_other_days_are_not_paydays(self):
+        assert not gd._is_payday(date(2026, 6, 6))
+        assert not gd._is_payday(date(2026, 6, 19))
+
+
+class TestPromoDay:
+    def test_singles_day(self):
+        assert gd._is_promo_day(date(2026, 11, 11))
+
+    def test_black_friday_is_last_friday_of_november(self):
+        bf = gd._black_friday(2026)
+        assert bf.month == 11 and bf.weekday() == 4
+        assert (bf + timedelta(days=7)).month == 12
+        assert gd._is_promo_day(bf)
+
+    def test_ordinary_day_is_not_promo(self):
+        assert not gd._is_promo_day(date(2026, 6, 15))
+
+
+class TestCalendarDayType:
+    def test_priority_promo_over_holiday_and_payday(self):
+        # 11.11 — не праздник и не зарплатный день сам по себе, но
+        # проверяем сам факт приоритета через прямое совпадение promo+payday
+        # невозможно в текущем календаре, поэтому проверяем каждый тип
+        # отдельно на своей дате.
+        assert gd.resolve_calendar_day_type(date(2026, 11, 11)) == "promo"
+        assert gd.resolve_calendar_day_type(date(2026, 6, 12)) == "holiday"
+        assert gd.resolve_calendar_day_type(date(2026, 6, 5)) == "payday"
+        assert gd.resolve_calendar_day_type(date(2026, 6, 15)) == "normal"
+
+    def test_multiplier_matches_day_type(self):
+        promo, holiday = date(2026, 11, 11), date(2026, 6, 12)
+        payday, normal = date(2026, 6, 5), date(2026, 6, 15)
+        assert gd.resolve_calendar_multiplier(promo) == gd.PROMO_VOLUME_MULTIPLIER
+        assert gd.resolve_calendar_multiplier(holiday) == gd.HOLIDAY_VOLUME_MULTIPLIER
+        assert gd.resolve_calendar_multiplier(payday) == gd.PAYDAY_VOLUME_MULTIPLIER
+        assert gd.resolve_calendar_multiplier(normal) == 1.0
+
+
+class TestResolveCountCalendar:
+    def test_load_date_none_skips_calendar_multiplier(self):
+        rng_a = gd.make_rng(date(2026, 11, 11))
+        rng_b = gd.make_rng(date(2026, 11, 11))
+        without_calendar = gd.resolve_count(
+            base_count=1000, rng=rng_a, launch_date=date(2026, 1, 1)
+        )
+        # без load_date шум тот же (тот же rng-сид), но без множителя промо
+        noise_only = float(rng_b.lognormal(mean=0.0, sigma=gd.VOLUME_NOISE_SIGMA))
+        assert without_calendar == max(1, round(1000 * noise_only))
+
+    def test_promo_day_inflates_count(self):
+        rng = gd.make_rng(date(2026, 11, 11))
+        count = gd.resolve_count(
+            base_count=1000,
+            rng=rng,
+            launch_date=date(2026, 1, 1),
+            load_date=date(2026, 11, 11),
+        )
+        # промо x2.5 поверх шума (sigma=0.15) — даже на нижнем хвосте шума
+        # должно быть заметно больше базового объёма
+        assert count > 1000 * 1.5
+
+    def test_holiday_deflates_count(self):
+        rng = gd.make_rng(date(2026, 6, 12))
+        count = gd.resolve_count(
+            base_count=1000,
+            rng=rng,
+            launch_date=date(2026, 1, 1),
+            load_date=date(2026, 6, 12),
+        )
+        assert count < 1000
+
+
+class TestLoadStressMultiplier:
+    def test_no_stress_at_or_below_baseline(self):
+        assert gd.resolve_load_stress_multiplier(1.0) == 1.0
+        assert gd.resolve_load_stress_multiplier(0.5) == 1.0
+
+    def test_stress_grows_with_load_above_baseline(self):
+        low = gd.resolve_load_stress_multiplier(1.2)
+        high = gd.resolve_load_stress_multiplier(2.5)
+        assert 1.0 < low < high
+
+    def test_payment_success_rate_depressed_by_load(self):
+        launch_date = date(2026, 6, 1)
+        far_from_launch = launch_date + timedelta(
+            days=gd.RAMP_PAYMENT_FAILURE_DECAY_DAYS * 10
+        )
+
+        calm_rng = gd.make_rng(far_from_launch)
+        calm_rate = gd.resolve_payment_success_rate(
+            load_date=far_from_launch,
+            rng=calm_rng,
+            launch_date=launch_date,
+            incident_calendar={},
+            load_ratio=1.0,
+        )
+
+        busy_rng = gd.make_rng(far_from_launch)
+        busy_rate = gd.resolve_payment_success_rate(
+            load_date=far_from_launch,
+            rng=busy_rng,
+            launch_date=launch_date,
+            incident_calendar={},
+            load_ratio=2.5,
+        )
+
+        assert busy_rate < calm_rate
+
+
+# ---------------------------------------------------------------------
 # validate_args
 # ---------------------------------------------------------------------
 
@@ -262,6 +407,7 @@ class TestValidateArgs:
             cancel_before_payment_rate=0.02,
             cancel_after_payment_rate=0.01,
             return_rate=0.05,
+            never_order_rate=0.18,
         )
         defaults.update(overrides)
 
@@ -550,6 +696,137 @@ class TestGenerateOrders:
         assert (
             df["order_id"].duplicated().sum()
         ) == dq["orders.duplicate_order_id_rows"]
+
+
+# ---------------------------------------------------------------------
+# Неконвертящиеся клиенты — регистрация ещё не покупка
+# ---------------------------------------------------------------------
+
+
+def _customers(
+    count: int,
+    channel: str = "organic",
+    prefix: str = "cus",
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "customer_id": [f"{prefix}_{i:06d}" for i in range(count)],
+            "registration_date": [datetime(2026, 1, 1)] * count,
+            "city": ["Москва"] * count,
+            "acquisition_channel": [channel] * count,
+            "email": [f"user{i}@example.com" for i in range(count)],
+        }
+    )
+
+
+class TestNeverOrderingCustomers:
+    def test_zero_rate_keeps_everyone_eligible(self):
+        customers = _customers(500)
+        assert not gd._customer_never_orders(customers, 0.0).any()
+        assert (gd._customer_order_weights(customers, 0.0) > 0).all()
+
+    def test_excluded_customers_get_zero_weight(self):
+        customers = _customers(500)
+        excluded = gd._customer_never_orders(customers, 0.3)
+        weights = gd._customer_order_weights(customers, 0.3)
+        assert excluded.any(), "при 0.3 кто-то должен отсеяться"
+        assert (weights[excluded] == 0).all()
+        assert (weights[~excluded] > 0).all()
+
+    def test_share_follows_rate_and_channel_multiplier(self):
+        customers = _customers(4000)
+        share = gd._customer_never_orders(customers, 0.3).mean()
+        expected = 0.3 * gd.ACQUISITION_CHANNEL_NON_CONVERSION_MULTIPLIER["organic"]
+        assert abs(share - expected) < 0.03
+
+    def test_paid_social_converts_worse_than_organic(self):
+        organic = gd._customer_never_orders(_customers(4000, "organic"), 0.2).mean()
+        paid = gd._customer_never_orders(_customers(4000, "vk_ads"), 0.2).mean()
+        assert paid > organic
+
+    def test_decision_is_stable_across_batches(self):
+        customers = _customers(1000)
+        first = gd._customer_never_orders(customers, 0.25)
+        # тот же список клиентов в другом порядке и в другой день
+        shuffled = customers.sample(frac=1, random_state=7).reset_index(drop=True)
+        second = gd._customer_never_orders(shuffled, 0.25)
+        by_id = dict(zip(customers["customer_id"], first, strict=True))
+        assert all(
+            by_id[cid] == flag
+            for cid, flag in zip(shuffled["customer_id"], second, strict=True)
+        )
+
+    def test_not_merely_the_low_frequency_tail(self):
+        """
+        Признак берёт другой срез md5, чем вес частоты заказов, поэтому
+        отсеянные не должны совпадать с «самыми пассивными» клиентами.
+        """
+        customers = _customers(1000)
+        excluded = gd._customer_never_orders(customers, 0.25)
+        frequency = gd._customer_order_weights(customers, 0.0)
+        lowest = np.argsort(frequency)[: int(excluded.sum())]
+        lowest_mask = np.zeros(len(customers), dtype=bool)
+        lowest_mask[lowest] = True
+        overlap = (excluded & lowest_mask).sum() / max(int(excluded.sum()), 1)
+        assert overlap < 0.5, "отсев не должен сводиться к хвосту частоты"
+
+    def test_orders_avoid_excluded_customers(self):
+        customers = _customers(600)
+        excluded_ids = set(
+            customers.loc[gd._customer_never_orders(customers, 0.3), "customer_id"]
+        )
+        df, _ = gd.generate_orders(
+            load_date=date(2026, 2, 1),
+            count=8000,
+            customers_df=customers,
+            rng=gd.make_rng(date(2026, 2, 1)),
+            error_rate=0.0,
+            never_order_rate=0.3,
+        )
+        assert len(df) == 8000
+        assert not (set(df["customer_id"]) & excluded_ids)
+
+    def test_conversion_is_below_one(self):
+        """Ради чего всё и делалось: конверсия перестаёт быть 100%."""
+        customers = _customers(600)
+        df, _ = gd.generate_orders(
+            load_date=date(2026, 2, 1),
+            count=20_000,
+            customers_df=customers,
+            rng=gd.make_rng(date(2026, 2, 1)),
+            error_rate=0.0,
+            never_order_rate=0.18,
+        )
+        conversion = df["customer_id"].nunique() / len(customers)
+        assert 0.5 < conversion < 0.95
+
+    def test_degenerate_batch_falls_back_to_base_weights(self):
+        """Если отсеялись вообще все, заказы всё равно надо разместить."""
+        pool = _customers(200, channel="vk_ads")
+        customers = (
+            pool.loc[gd._customer_never_orders(pool, 1.0)]
+            .head(3)
+            .reset_index(drop=True)
+        )
+        assert gd._customer_never_orders(customers, 1.0).all()
+
+        weights = gd._customer_order_weights(customers, 1.0)
+        assert (weights > 0).all(), "полный отсев откатывается к базовым весам"
+
+        df, _ = gd.generate_orders(
+            load_date=date(2026, 2, 1),
+            count=50,
+            customers_df=customers,
+            rng=gd.make_rng(date(2026, 2, 1)),
+            error_rate=0.0,
+            never_order_rate=1.0,
+        )
+        assert len(df) == 50
+
+    def test_unknown_channel_falls_back_to_neutral_multiplier(self):
+        customers = _customers(2000, channel="unknown_channel")
+        share = gd._customer_never_orders(customers, 0.2).mean()
+        assert abs(share - 0.2) < 0.03
 
 
 # ---------------------------------------------------------------------

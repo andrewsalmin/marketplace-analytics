@@ -114,6 +114,40 @@ ACQUISITION_CHANNEL_WEIGHTS = [
     0.03,  # email
 ]
 
+# Множитель к весу «частоты заказов» (_customer_order_weights) по каналу
+# привлечения. Органика/рефералы/email — уже вовлечённая или доверяющая
+# бренду аудитория (искала сама, пришла по рекомендации, уже подписана) —
+# выше склонность к повторным заказам. Платный social (vk/telegram/social
+# ads) — типичный «один клик — один заказ», ниже LTV. yandex_direct
+# (performance-поиск с явным интентом) — посередине. Соответствует
+# типичному распределению качества трафика по каналам в e-commerce.
+ACQUISITION_CHANNEL_LOYALTY_MULTIPLIER = {
+    "organic": 1.3,
+    "referral": 1.4,
+    "email": 1.2,
+    "yandex_direct": 1.0,
+    "vk_ads": 0.6,
+    "telegram_ads": 0.6,
+    "social": 0.7,
+}
+
+# Множитель к базовой доле клиентов, которые не сделают ни одного заказа
+# (--never-order-rate). Регистрация — ещё не покупка: часть аудитории
+# заводит аккаунт и уходит, и без этого конверсия «регистрация → первый
+# заказ» в данных всегда равна 100%. Логика качества трафика та же, что
+# в LOYALTY_MULTIPLIER выше, но с другого конца воронки: платный social
+# приводит «мёртвых» регистраций заметно больше, чем органика и
+# рефералы, — поэтому множители тут обратны по смыслу.
+ACQUISITION_CHANNEL_NON_CONVERSION_MULTIPLIER = {
+    "organic": 0.7,
+    "referral": 0.6,
+    "email": 0.8,
+    "yandex_direct": 1.0,
+    "vk_ads": 1.6,
+    "telegram_ads": 1.6,
+    "social": 1.4,
+}
+
 PAYMENT_METHODS = ["card", "sbp", "mir_pay", "cash"]
 # apple_pay/google_pay не используются — NFC-платежи недоступны в РФ
 # с 2022, mir_pay — реальная российская NFC-альтернатива
@@ -166,14 +200,29 @@ PAYMENT_COLUMNS = [
 # Распределение времени суток: пик день/вечер, минимум ночь. Используется
 # для created_at заказов, момента попытки оплаты и registration_date
 # клиентов. Веса не обязаны суммироваться в 1.0 — нормализуются в
-# _realistic_timestamps().
-HOUR_WEIGHTS = [
-    0.008, 0.008, 0.008, 0.008, 0.008, 0.008,  # 00-05: ночь
-    0.017, 0.025, 0.033, 0.042,                # 06-09: утро, рост
-    0.050, 0.050, 0.058, 0.058,                # 10-13: день
-    0.050, 0.050, 0.058, 0.067,                # 14-17: день
-    0.075, 0.083, 0.083, 0.075,                # 18-21: вечерний пик
+# _realistic_timestamps(). Будни и выходные используют разные профили
+# (см. WEEKEND_HOUR_WEIGHTS) — иначе почасовая структура всех семи дней
+# получается статистически неотличимой (корреляция >99%), что для
+# реального маркетплейса неправдоподобно.
+WEEKDAY_HOUR_WEIGHTS = [
+    0.006, 0.005, 0.005, 0.005, 0.006, 0.010,  # 00-05: ночь
+    0.022, 0.035, 0.045, 0.040,                # 06-09: утренний рывок перед работой
+    0.035, 0.038, 0.070, 0.060,                # 10-13: рабочий провал + обед. всплеск
+    0.040, 0.038, 0.045, 0.060,                # 14-17: рабочий день, разгон к вечеру
+    0.085, 0.095, 0.090, 0.075,                # 18-21: вечерний пик после работы
     0.050, 0.025,                              # 22-23: спад
+]
+
+# Выходные: нет рабочего провала и обеденного всплеска — активность
+# растянута по дню без острого пика, начинается позже (люди высыпаются)
+# и держится ровнее до вечера.
+WEEKEND_HOUR_WEIGHTS = [
+    0.010, 0.008, 0.006, 0.005, 0.005, 0.006,  # 00-05: ночь (чуть дольше не спят)
+    0.010, 0.015, 0.025, 0.035,                # 06-09: медленный старт, без будильника
+    0.050, 0.060, 0.065, 0.065,                # 10-13: позднее утро/полдень разгоняются
+    0.070, 0.075, 0.075, 0.070,                # 14-17: дневное плато — досуговый шопинг
+    0.070, 0.065, 0.060, 0.050,                # 18-21: вечер держится, без острого пика
+    0.040, 0.025,                              # 22-23: спад
 ]
 
 # Нижние границы сдвига для каждого перехода state machine — без них
@@ -255,6 +304,122 @@ RAMP_PAYMENT_FAILURE_DECAY_DAYS = 14  # платёжный процессинг 
 
 PAYMENT_FAILURE_NOISE_SIGMA = 0.15  # логнормальный день-в-день джиттер вокруг тренда
 
+# ---------------------------------------------------------------------
+# Календарь дней особого объёма (включается флагом --launch-date)
+#
+# В отличие от календаря инцидентов (_build_incident_calendar) — это не
+# случайные редкие сбои, а ДЕТЕРМИНИРОВАННОЕ правило по самой дате:
+# праздник/зарплата/промо. daily_marketplace_pipeline (Airflow DAG)
+# крутится ежедневно бессрочно, поэтому даты заданы как (месяц, день)
+# правила, а не жёстко прибитый список конкретных годов — работают на
+# любую будущую дату без сопровождения.
+# ---------------------------------------------------------------------
+
+# Гос. праздники РФ, официально нерабочие дни (месяц, день) — без учёта
+# переносов между конкретными годами (см. _holiday_dates_for_year).
+PUBLIC_HOLIDAYS_MD = [
+    (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6), (1, 7), (1, 8),  # НГ + Рождество
+    (2, 23),
+    (3, 8),
+    (5, 1),
+    (5, 9),
+    (6, 12),
+    (11, 4),
+]
+
+HOLIDAY_VOLUME_MULTIPLIER = 0.75  # активность и логистика проседают в нерабочий день
+PAYDAY_VOLUME_MULTIPLIER = 1.15   # 5-е/20-е число — зарплата/аванс, есть на что тратить
+PROMO_VOLUME_MULTIPLIER = 2.5     # 11.11 и «чёрная пятница» — ради чего ждут этот день
+
+# Множитель на failure_rate/долю отмен от перегрузки в дни, когда
+# фактический объём заказов (после шума и календаря) выше базового —
+# склад/платёжный шлюз не резиновые. Работает только "вверх"
+# (load_ratio > 1): тихий день сам по себе не улучшает конверсию, только
+# перегруженный ухудшает её.
+LOAD_STRESS_SENSITIVITY = 0.4
+
+
+def _holiday_dates_for_year(year: int) -> set[date]:
+    """
+    Набор нерабочих дат в данном году: все PUBLIC_HOLIDAYS_MD плюс
+    перенос на ближайший будний день вперёд для каждого праздника,
+    выпавшего на выходные — упрощённая имитация реального переноса
+    выходных Правительством РФ (который не сводится к чистому правилу
+    "следующий понедельник" и публикуется отдельным постановлением
+    на каждый год — см. README, раздел «Известные ограничения»).
+    """
+    dates: set[date] = set()
+
+    for month, day in PUBLIC_HOLIDAYS_MD:
+        holiday = date(year, month, day)
+        dates.add(holiday)
+
+        if holiday.weekday() >= 5:  # суббота/воскресенье
+            shifted = holiday + timedelta(days=1)
+            while shifted.weekday() >= 5:
+                shifted += timedelta(days=1)
+            dates.add(shifted)
+
+    return dates
+
+
+def _is_public_holiday(d: date) -> bool:
+    return d in _holiday_dates_for_year(d.year)
+
+
+def _is_payday(d: date) -> bool:
+    return d.day in (5, 20)
+
+
+def _black_friday(year: int) -> date:
+    """Последняя пятница ноября."""
+    d = date(year, 11, 30)
+
+    while d.weekday() != 4:  # пятница
+        d -= timedelta(days=1)
+
+    return d
+
+
+def _is_promo_day(d: date) -> bool:
+    return (d.month, d.day) == (11, 11) or d == _black_friday(d.year)
+
+
+def resolve_calendar_day_type(load_date: date) -> str:
+    """
+    Тип дня по календарю: 'promo' > 'holiday' > 'payday' > 'normal' —
+    приоритет, а не перемножение эффектов, чтобы при совпадении дат
+    (например, зарплата пришлась на праздник) не накручивать множитель
+    сверх правдоподобного.
+    """
+    if _is_promo_day(load_date):
+        return "promo"
+    if _is_public_holiday(load_date):
+        return "holiday"
+    if _is_payday(load_date):
+        return "payday"
+    return "normal"
+
+
+def resolve_calendar_multiplier(load_date: date) -> float:
+    """Множитель объёма по типу дня — см. resolve_calendar_day_type()."""
+    return {
+        "promo": PROMO_VOLUME_MULTIPLIER,
+        "holiday": HOLIDAY_VOLUME_MULTIPLIER,
+        "payday": PAYDAY_VOLUME_MULTIPLIER,
+        "normal": 1.0,
+    }[resolve_calendar_day_type(load_date)]
+
+
+def resolve_load_stress_multiplier(load_ratio: float) -> float:
+    """
+    load_ratio — отношение фактического (после шума и календаря) объёма
+    заказов к базовому за день. > 1 означает, что сегодня заказов больше,
+    чем система в среднем рассчитана обрабатывать.
+    """
+    return 1.0 + LOAD_STRESS_SENSITIVITY * max(load_ratio - 1.0, 0.0)
+
+
 SCHEMA_VERSION = "4.0.0"
 GENERATOR_VERSION = "4.0.0"
 
@@ -287,6 +452,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cancel-before-payment-rate", type=float, default=0.02)
     parser.add_argument("--cancel-after-payment-rate", type=float, default=0.01)
     parser.add_argument("--return-rate", type=float, default=0.05)
+    # Доля зарегистрировавшихся, которые не сделают ни одного заказа.
+    # 0.18 — консервативная оценка для маркетплейса с низким порогом
+    # регистрации; при 0 конверсия «регистрация -> первый заказ» в
+    # данных всегда 100%, и метрика перестаёт что-либо измерять.
+    parser.add_argument("--never-order-rate", type=float, default=0.18)
 
     return parser.parse_args()
 
@@ -324,6 +494,7 @@ def validate_args(args: argparse.Namespace) -> None:
         "cancel_before_payment_rate",
         "cancel_after_payment_rate",
         "return_rate",
+        "never_order_rate",
     ]:
         value = getattr(args, field)
         if not 0 <= value <= 1:
@@ -493,6 +664,7 @@ def resolve_payment_success_rate(
     rng: np.random.Generator,
     launch_date: date | None,
     incident_calendar: dict[str, list[tuple[int, int, float]]] | None = None,
+    load_ratio: float = 1.0,
 ) -> float:
     """
     Эффективный PAYMENT_SUCCESS_RATE на день. Без launch_date возвращает
@@ -504,6 +676,8 @@ def resolve_payment_success_rate(
     PAYMENT_FAILURE_NOISE_SIGMA константы, но переиспользованная запись
     "payments" из календаря инцидентов — один и тот же сбой платёжной
     инфраструктуры правдоподобно бьёт и по DQ, и по конверсии оплаты),
+    плюс load_ratio (см. resolve_load_stress_multiplier) — перегрузка от
+    аномально высокого объёма дня тоже просаживает конверсию оплаты,
     затем конвертируется обратно в success rate.
     """
     if launch_date is None:
@@ -519,8 +693,9 @@ def resolve_payment_success_rate(
     )
     noise = float(rng.lognormal(mean=0.0, sigma=PAYMENT_FAILURE_NOISE_SIGMA))
     incident = _incident_multiplier(incident_calendar or {}, "payments", day_index)
+    stress = resolve_load_stress_multiplier(load_ratio)
 
-    failure_rate = min(base_failure_rate * ramp * noise * incident, 1.0)
+    failure_rate = min(base_failure_rate * ramp * noise * incident * stress, 1.0)
     return 1.0 - failure_rate
 
 
@@ -528,19 +703,25 @@ def resolve_count(
     base_count: int,
     rng: np.random.Generator,
     launch_date: date | None,
+    load_date: date | None = None,
 ) -> int:
     """
-    Применяет мультипликативный логнормальный шум к целевому объёму
-    (--customers-count/--orders-count) — сама кривая роста детерминированно
-    считается в backfill_history.sh, здесь только день-в-день джиттер вокруг
-    неё. Без launch_date возвращает base_count как есть (обратная
-    совместимость с прямыми вызовами generate_data.py вне бэкафилла).
+    Применяет мультипликативный логнормальный шум и, если передан
+    load_date, календарный множитель дня (см. resolve_calendar_multiplier)
+    к целевому объёму (--customers-count/--orders-count) — сама кривая
+    роста детерминированно считается в backfill_history.sh, здесь только
+    день-в-день джиттер и тип дня поверх неё. Без launch_date возвращает
+    base_count как есть (обратная совместимость с прямыми вызовами
+    generate_data.py вне бэкафилла).
     """
     if launch_date is None or base_count == 0:
         return base_count
 
     noise = float(rng.lognormal(mean=0.0, sigma=VOLUME_NOISE_SIGMA))
-    return max(1, round(base_count * noise))
+    calendar_multiplier = (
+        resolve_calendar_multiplier(load_date) if load_date is not None else 1.0
+    )
+    return max(1, round(base_count * noise * calendar_multiplier))
 
 
 def ensure_batch_does_not_exist(source_root: Path, load_date: date) -> None:
@@ -580,16 +761,29 @@ def _concat_frames(frames: list[pd.DataFrame], columns: list[str]) -> pd.DataFra
 
 
 def _realistic_timestamps(days: list[date], rng: np.random.Generator) -> list[datetime]:
-    """Реалистичное время суток (взвешено по HOUR_WEIGHTS) для каждого дня в `days`."""
+    """Реалистичное время суток для каждого дня в `days`, взвешено по
+    WEEKDAY_HOUR_WEIGHTS/WEEKEND_HOUR_WEIGHTS в зависимости от дня недели."""
     n = len(days)
 
     if n == 0:
         return []
 
-    weights = np.array(HOUR_WEIGHTS, dtype=float)
-    weights = weights / weights.sum()
+    weekdays = np.array([d.weekday() for d in days])
+    hours = np.empty(n, dtype=np.int64)
 
-    hours = rng.choice(24, size=n, p=weights)
+    for is_weekend in (False, True):
+        mask = (weekdays >= 5) == is_weekend
+        group_size = int(mask.sum())
+
+        if group_size == 0:
+            continue
+
+        raw_weights = WEEKEND_HOUR_WEIGHTS if is_weekend else WEEKDAY_HOUR_WEIGHTS
+        weights = np.array(raw_weights, dtype=float)
+        weights = weights / weights.sum()
+
+        hours[mask] = rng.choice(24, size=group_size, p=weights)
+
     minutes = rng.integers(0, 60, size=n)
     seconds = rng.integers(0, 60, size=n)
 
@@ -841,11 +1035,101 @@ def generate_order_amounts(
 ) -> np.ndarray:
     """
     Логнормальное распределение сумм заказов (большинство чеков небольшие,
-    крупные — редкий хвост), клип в диапазон [500, 100_000] копеек.
+    крупные — редкий хвост), клип в диапазон [15_000, 15_000_000] копеек
+    (150–150 000 ₽). Калибровано под универсальный маркетплейс смешанных
+    категорий (одежда/электроника/товары для дома, а-ля Ozon/Wildberries):
+    mean=11.9, sigma=0.8 даёт медиану ~1475₽ и средний чек ~2000₽ —
+    большинство заказов недорогие, но хвост уходит в крупную бытовую
+    технику/электронику.
     """
-    raw = rng.lognormal(mean=8.0, sigma=0.9, size=count)
-    clipped = np.clip(raw, 500, 100_000)
+    raw = rng.lognormal(mean=11.9, sigma=0.8, size=count)
+    clipped = np.clip(raw, 15_000, 15_000_000)
     return clipped.astype(np.int64)
+
+
+def _customer_never_orders(
+    customers: pd.DataFrame,
+    never_order_rate: float,
+) -> np.ndarray:
+    """
+    Булев признак «клиент не сделает ни одного заказа» — детерминированный
+    из customer_id, как и вес частоты заказов, чтобы решение не
+    перевыбиралось на каждом батче: зарегистрировавшийся и ушедший клиент
+    должен остаться ушедшим и завтра.
+
+    Берётся другой срез md5, чем в _customer_order_weights: на одном и том
+    же срезе «не купит никогда» и «покупает редко» оказались бы одним
+    признаком, и неконвертящиеся были бы просто хвостом распределения
+    частоты, а не отдельным поведением.
+
+    Доля зависит от канала привлечения
+    (ACQUISITION_CHANNEL_NON_CONVERSION_MULTIPLIER) и клипается сверху
+    на 0.95 — полностью мёртвый канал не моделируем.
+    """
+    if never_order_rate <= 0 or customers.empty:
+        return np.zeros(len(customers), dtype=bool)
+
+    digests = customers["customer_id"].map(
+        lambda cid: int(hashlib.md5(cid.encode()).hexdigest()[12:24], 16)
+    )
+    uniform = (digests % 10_000_000).to_numpy() / 10_000_000
+
+    channel_multiplier = (
+        customers["acquisition_channel"]
+        .map(ACQUISITION_CHANNEL_NON_CONVERSION_MULTIPLIER)
+        .fillna(1.0)
+        .to_numpy()
+    )
+    threshold = np.clip(never_order_rate * channel_multiplier, 0.0, 0.95)
+
+    return uniform < threshold
+
+
+def _customer_order_weights(
+    customers: pd.DataFrame,
+    never_order_rate: float = 0.0,
+) -> np.ndarray:
+    """
+    Вес «частоты заказов» по клиенту — детерминированный (из md5 хеша
+    customer_id, а не из rng текущего батча), поэтому один и тот же
+    клиент остаётся одинаково активным/пассивным изо дня в день, а не
+    перевыбирается заново равновероятно на каждом батче. Экспоненциальный
+    хвост весов даёт реалистичный перекос повторных покупок: небольшая
+    доля клиентов формирует основную массу заказов, а не все клиенты
+    покупают одинаково часто (как было при равновероятном выборе).
+
+    Домножается на ACQUISITION_CHANNEL_LOYALTY_MULTIPLIER — канал
+    привлечения клиента влияет на его склонность к повторным заказам
+    (см. константу выше), а не остаётся статичной меткой без последствий.
+
+    Клиенты, помеченные _customer_never_orders(), получают нулевой вес:
+    они зарегистрировались и не купили ничего никогда.
+    """
+    digests = customers["customer_id"].map(
+        lambda cid: int(hashlib.md5(cid.encode()).hexdigest()[:12], 16)
+    )
+    uniform = np.clip((digests % 10_000_000) / 10_000_000, 1e-9, 1 - 1e-9)
+    base_weight = -np.log(1 - uniform.to_numpy())
+
+    channel_multiplier = (
+        customers["acquisition_channel"]
+        .map(ACQUISITION_CHANNEL_LOYALTY_MULTIPLIER)
+        .to_numpy()
+    )
+
+    weights = base_weight * channel_multiplier
+
+    never_orders = _customer_never_orders(customers, never_order_rate)
+    if never_orders.all():
+        # Вырожденный случай: все известные клиенты — неконвертящиеся.
+        # Заказы всё равно надо кому-то приписать, иначе батч упадёт на
+        # делении на нулевую сумму весов. На реальных объёмах не
+        # встречается (0.18^N), но маленькие тестовые батчи ловит.
+        return weights
+
+    weights[never_orders] = 0.0
+
+    return weights
 
 
 def generate_orders(
@@ -854,11 +1138,17 @@ def generate_orders(
     customers_df: pd.DataFrame,
     rng: np.random.Generator,
     error_rate: float,
+    never_order_rate: float = 0.0,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     """
     Создаёт `count` НОВЫХ заказов, все в статусе "new", created_at —
     сегодня с реалистичным временем суток. Дальнейшее продвижение по
     state machine — забота advance_open_orders(), не этой функции.
+
+    `never_order_rate` — доля клиентов, которые не сделают ни одного
+    заказа никогда (см. _customer_never_orders). При 0.0 заказ рано или
+    поздно получает каждый клиент, и конверсия «регистрация → первый
+    заказ» в данных равна 100%.
     """
     if count == 0:
         return pd.DataFrame(columns=ORDER_COLUMNS), {}
@@ -866,9 +1156,17 @@ def generate_orders(
     if customers_df.empty:
         raise ValueError("Cannot generate orders without customers")
 
-    customers = customers_df.reset_index(drop=True)
+    # customers_df может содержать строки с customer_id=None, намеренно
+    # внесённые generate_customers для DQ-метрики customers.null_customer_id
+    # — такие клиенты не должны участвовать в выборе получателя заказа
+    # (у заказов свой независимый orders.null_customer_id, см. ниже).
+    customers = customers_df.dropna(subset=["customer_id"]).reset_index(drop=True)
+    if customers.empty:
+        raise ValueError("Cannot generate orders without customers")
 
-    customer_idx = rng.integers(0, len(customers), size=count)
+    weights = _customer_order_weights(customers, never_order_rate)
+    weights = weights / weights.sum()
+    customer_idx = rng.choice(len(customers), size=count, p=weights)
     chosen_customers = customers.iloc[customer_idx].reset_index(drop=True)
 
     created_at = _realistic_timestamps([load_date] * count, rng)
@@ -1429,15 +1727,37 @@ def main() -> None:
         for entity in DQ_ENTITIES
     }
 
-    effective_customers_count = resolve_count(args.customers_count, rng, launch_date)
-    effective_orders_count = resolve_count(args.orders_count, rng, launch_date)
-    effective_payments_count = resolve_count(args.payments_count, rng, launch_date)
+    effective_customers_count = resolve_count(
+        args.customers_count, rng, launch_date, load_date
+    )
+    effective_orders_count = resolve_count(
+        args.orders_count, rng, launch_date, load_date
+    )
+    effective_payments_count = resolve_count(
+        args.payments_count, rng, launch_date, load_date
+    )
+
+    # Насколько сегодняшний фактический объём заказов (после шума и
+    # календаря) выше базового — сигнал "нагрузки" для просадки конверсии
+    # оплаты и учащения отмен ниже. Без launch_date effective==base всегда,
+    # так что load_ratio==1.0 и ничего не меняется (обратная совместимость).
+    load_ratio = (
+        effective_orders_count / args.orders_count if args.orders_count > 0 else 1.0
+    )
+    load_stress = resolve_load_stress_multiplier(load_ratio)
 
     effective_payment_success_rate = resolve_payment_success_rate(
         load_date=load_date,
         rng=rng,
         launch_date=launch_date,
         incident_calendar=incident_calendar,
+        load_ratio=load_ratio,
+    )
+    effective_cancel_before_payment_rate = min(
+        args.cancel_before_payment_rate * load_stress, 1.0
+    )
+    effective_cancel_after_payment_rate = min(
+        args.cancel_after_payment_rate * load_stress, 1.0
     )
 
     existing_customers_df = load_existing_customers(source_root, load_date)
@@ -1457,12 +1777,21 @@ def main() -> None:
         CUSTOMER_COLUMNS,
     ).drop_duplicates("customer_id")
 
+    # Только для лога: сколько накопленных клиентов не купят ничего
+    # никогда. Считается по тому же признаку, что и веса заказов, так
+    # что цифра сходится с тем, что увидит дашборд.
+    never_ordering_customers = _customer_never_orders(
+        all_customers_df.dropna(subset=["customer_id"]),
+        args.never_order_rate,
+    ).sum()
+
     new_orders_df, orders_dq = generate_orders(
         load_date=load_date,
         count=effective_orders_count,
         customers_df=all_customers_df,
         rng=rng,
         error_rate=effective_error_rates["orders"],
+        never_order_rate=args.never_order_rate,
     )
 
     lookback_days = compute_lookback_days(args)
@@ -1483,8 +1812,8 @@ def main() -> None:
         pickup_deadline_days=args.pickup_deadline_days,
         return_window_days=args.return_window_days,
         refund_processing_hours=args.refund_processing_hours,
-        cancel_before_payment_rate=args.cancel_before_payment_rate,
-        cancel_after_payment_rate=args.cancel_after_payment_rate,
+        cancel_before_payment_rate=effective_cancel_before_payment_rate,
+        cancel_after_payment_rate=effective_cancel_after_payment_rate,
         return_rate=args.return_rate,
         error_rate=effective_error_rates["orders"],
     )
@@ -1559,6 +1888,16 @@ def main() -> None:
             "effective_payments_count": effective_payments_count,
             "configured_payment_success_rate": PAYMENT_SUCCESS_RATE,
             "effective_payment_success_rate": effective_payment_success_rate,
+            "calendar_day_type": resolve_calendar_day_type(load_date)
+            if launch_date
+            else None,
+            "load_ratio": load_ratio,
+            "configured_cancel_before_payment_rate": args.cancel_before_payment_rate,
+            "effective_cancel_before_payment_rate": (
+                effective_cancel_before_payment_rate
+            ),
+            "configured_cancel_after_payment_rate": args.cancel_after_payment_rate,
+            "effective_cancel_after_payment_rate": effective_cancel_after_payment_rate,
             "entities": {
                 "customers": {
                     "rows": len(new_customers_df),
@@ -1598,6 +1937,11 @@ def main() -> None:
     logger.info("Generation completed successfully.")
     logger.info("Load date: %s", load_date)
     logger.info("Customers:        %s", f"{len(new_customers_df):,}")
+    logger.info(
+        "  never order:    %s of %s known",
+        f"{int(never_ordering_customers):,}",
+        f"{len(all_customers_df):,}",
+    )
     logger.info("Orders written:   %s", f"{len(orders_to_write_df):,}")
     logger.info("  brand new:      %s", f"{len(new_orders_df):,}")
     logger.info("  advanced:       %s", f"{len(advanced_df):,}")
