@@ -11,6 +11,8 @@ from pathlib import Path
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
+from growth import customer_maturity_days, load_growth_config, maturity_days
+
 logger = logging.getLogger(__name__)
 
 # Все таблицы, партиционированные по load_date (см. clickhouse_schema.sql) —
@@ -26,6 +28,12 @@ PARTITIONED_TABLES = [
 ]
 
 
+def _load_json_config(name: str) -> dict:
+    return json.loads(
+        (Path(__file__).parent / name).read_text(encoding="utf-8")
+    )
+
+
 def load_clickhouse_defaults() -> dict:
     """Читает host/port/database/user из clickhouse_config.json.
 
@@ -35,8 +43,7 @@ def load_clickhouse_defaults() -> dict:
     он приходит из переменной окружения CLICKHOUSE_PASSWORD (или, для
     ручных запусков, из --clickhouse-password).
     """
-    config_path = Path(__file__).parent / "clickhouse_config.json"
-    return json.loads(config_path.read_text(encoding="utf-8"))
+    return _load_json_config("clickhouse_config.json")
 
 
 def parse_args() -> argparse.Namespace:
@@ -163,11 +170,10 @@ def ch_execute(args, sql: str, use_database: bool = True) -> str:
         raise RuntimeError(f"ClickHouse-запрос упал: {sql!r}\n{body}") from exc
 
 
-def ensure_schema(args) -> None:
-    schema_path = Path(__file__).parent / "clickhouse_schema.sql"
-    statements = schema_path.read_text(encoding="utf-8").split(";")
+def _execute_sql_script(args, script: str) -> int:
+    executed = 0
 
-    for statement in statements:
+    for statement in script.split(";"):
         statement = statement.strip()
 
         if not statement:
@@ -181,6 +187,54 @@ def ensure_schema(args) -> None:
             statement,
             use_database="CREATE DATABASE" not in statement.upper(),
         )
+        executed += 1
+
+    return executed
+
+
+def ensure_schema(args) -> None:
+    _execute_sql_script(
+        args,
+        (Path(__file__).parent / "clickhouse_schema.sql").read_text(
+            encoding="utf-8"
+        ),
+    )
+
+
+def ensure_marts(args) -> None:
+    """Пересоздаёт семантический слой (база marketplace_marts).
+
+    Витрины — обычные VIEW, вычисляются на лету, поэтому их можно просто
+    переналивать на каждом запуске: изменившееся бизнес-правило в
+    growth_config.json доезжает до дашборда без отдельного шага.
+
+    Горизонты зрелости подставляются сюда из growth_config.json, а не
+    записаны в SQL: иначе у хранилища появилась бы собственная копия
+    бизнес-правил, расходящаяся с генератором и Airflow DAG'ом.
+    """
+    growth_config = load_growth_config()
+
+    script = (Path(__file__).parent / "clickhouse_marts.sql").read_text(
+        encoding="utf-8"
+    )
+    script = script.replace(
+        "{{MATURITY_DAYS}}",
+        str(maturity_days(growth_config)),
+    )
+    script = script.replace(
+        "{{CUSTOMER_MATURITY_DAYS}}",
+        str(customer_maturity_days(growth_config)),
+    )
+
+    # Незакрытый плейсхолдер уехал бы в ClickHouse как синтаксическая
+    # ошибка посреди CREATE VIEW — понятнее упасть здесь и по делу.
+    if "{{" in script:
+        leftover = script[script.index("{{"):][:40]
+        raise RuntimeError(f"В clickhouse_marts.sql остался плейсхолдер: {leftover}")
+
+    count = _execute_sql_script(args, script)
+
+    logger.info("[MARTS] %d objects in marketplace_marts are up to date.", count)
 
 
 def is_load_date_committed(args) -> bool:
@@ -267,6 +321,7 @@ def main() -> None:
     args = parse_args()
 
     ensure_schema(args)
+    ensure_marts(args)
 
     if is_load_date_committed(args):
         if not args.force_reload:

@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Применение правок ревью дашборда «Аналитика маркетплейса» к Superset.
 
-Скрипт правит витрины, чарты и метаданные дашборда через REST API. Он
+Скрипт правит датасеты, чарты и метаданные дашборда через REST API. Он
 идемпотентен: повторный запуск приводит инстанс в то же состояние, а не
 накапливает изменения.
+
+SQL витрин здесь нет — он живёт в clickhouse_marts.sql как объекты базы
+marketplace_marts, и скрипт только переводит датасеты Superset на них
+(sql=None, схема marketplace_marts). Датасет при этом не пересоздаётся и
+не переименовывается, поэтому чарты, ссылающиеся на него по id, ничего
+не замечают. Витрины должны быть применены раньше — это делает
+load_to_clickhouse.py (ensure_marts) при любой загрузке.
 
 Фазы соответствуют приоритетам ревью:
 
@@ -25,6 +32,10 @@
 ./superset_backup_<timestamp>.zip — это и есть путь отката (импорт ZIP
 через UI или /api/v1/dashboard/import/ с overwrite=true).
 
+Требует, чтобы в Superset была заведена база с доступом к схеме
+marketplace_marts: датасеты создаются в той же базе Superset, что и
+существующий датасет orders, но в другой схеме ClickHouse.
+
 Целевая версия Superset — 4.1+ (чарты echarts_*, heatmap_v2, matrixify в
 form_data). Неизвестные ключи form_data Superset игнорирует молча, так
 что несовпадение версии проявится как «правка не подействовала», а не
@@ -37,13 +48,19 @@ import argparse
 import copy
 import getpass
 import json
-import math
 import os
 import pathlib
 import re
 import sys
 from datetime import datetime, timezone
 from typing import Any
+
+# Скрипт лежит в подкаталоге, а growth.py — в корне репозитория: проект
+# не устанавливается пакетом, поэтому корень добавляется в путь так же,
+# как это делает conftest.py для тестов.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+from growth import maturity_days  # noqa: E402
 
 try:
     import requests
@@ -55,105 +72,32 @@ except ImportError:  # pragma: no cover - подсказка вместо тре
 # Общие SQL-фрагменты
 # ---------------------------------------------------------------------------
 
-ORDERS = "marketplace_analytics.orders FINAL"
+# База семантического слоя в ClickHouse (clickhouse_marts.sql). Имена
+# витрин там совпадают с именами датасетов здесь один в один — именно
+# поэтому перевод датасета на витрину не требует его переименования, и
+# чарты, ссылающиеся на датасет по id, ничего не замечают.
+MARTS_SCHEMA = "marketplace_marts"
 
-# P0-03. Заказ считается «зрелым», когда он уже не может сменить статус.
-# Горизонт — сумма всех дедлайнов подряд, ровно как её считает
-# compute_lookback_days() в generate_data.py: на дефолтах это 34 дня, а
-# не круглая неделя. Разница существенная — отмена «не забрали вовремя»
-# срабатывает на 17-й день, возврат возможен вплоть до 34-го, так что
-# при недельной отсечке доля возвратов на правом краю всё равно была бы
-# занижена.
-#
-# Отсчёт от максимума в данных, а не от now(), чтобы остановленный
-# пайплайн не съедал график целиком.
-def _maturity_days() -> int:
-    """Горизонт закрытия заказа в днях — из growth_config.json.
+# Горизонт зрелости заказа нужен здесь только для подписей чартов —
+# сама отсечка делается колонкой is_mature, которую считает витрина.
+# Значение берётся из growth_config.json тем же кодом, что и в
+# load_to_clickhouse.py, чтобы текст под графиком не разошёлся с тем,
+# что реально посчитано.
+MATURITY_DAYS = maturity_days()
 
-    Тот же файл читают backfill_history.sh, run_downstream_pipeline.sh и
-    Airflow DAG: бизнес-правила живут в одном месте, и дашборд не должен
-    заводить собственную копию дедлайнов.
-    """
-    config_path = pathlib.Path(__file__).resolve().parent.parent / "growth_config.json"
-    try:
-        cfg = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return 34  # дефолты generate_data.py, если конфиг недоступен
-    return (
-        math.ceil(cfg["payment_deadline_hours"] / 24)
-        + math.ceil(cfg["shipping_deadline_hours"] / 24)
-        + cfg["delivery_deadline_days"]
-        + cfg["pickup_deadline_days"]
-        + cfg["return_window_days"]
-        + math.ceil(cfg["refund_processing_hours"] / 24)
-    )
-
-
-MATURITY_DAYS = _maturity_days()
-
-# Выражение годится только внутри SQL витрины. В фильтре чарта его быть
-# не может: Superset отвергает подзапросы в custom SQL
-# (ALLOW_ADHOC_SUBQUERY=False) и рисует «Custom SQL fields cannot contain
-# sub-queries» вместо графика. Поэтому витрины отдают готовую колонку
-# is_mature, а чарты фильтруют по ней (MATURE_FILTER).
-MATURE_ORDERS = (
-    f"created_at < (SELECT max(created_at) - INTERVAL {MATURITY_DAYS} DAY "
-    f"FROM {ORDERS})"
-)
+# Раньше отсечка незрелых заказов жила прямо в фильтре чарта подзапросом.
+# Superset такие фильтры не исполняет (ALLOW_ADHOC_SUBQUERY=False) и
+# рисует «Custom SQL fields cannot contain sub-queries» вместо графика.
+# Строка нужна, чтобы вычистить фильтр из чартов, где он ещё остался.
+OBSOLETE_FILTERS = [
+    "created_at < (SELECT max(created_at) - INTERVAL "
+    f"{MATURITY_DAYS} DAY FROM marketplace_analytics.orders FINAL)"
+]
 
 MATURE_FILTER = ("is_mature = 1", "is_mature")
 
-# Фильтр с подзапросом, который стоял в чартах до этого: его надо
-# вычистить, иначе он останется рядом с новым и продолжит ломать чарт.
-OBSOLETE_FILTERS = [MATURE_ORDERS]
-
-# P0-04/P0-05. Клиент «зрелый» через 30 дней после регистрации.
-MATURE_REGISTRATION = (
-    "registration_date < "
-    f"(SELECT max(created_at) - INTERVAL 30 DAY FROM {ORDERS})"
-)
-
 PAID = "paid_at IS NOT NULL"
 NOT_CANCELLED = "cancelled_at IS NULL AND refunded_at IS NULL"
-
-CHANNEL_RU_CASE = """CASE {col}
-        WHEN 'telegram_ads'  THEN 'Реклама в Telegram'
-        WHEN 'social'        THEN 'Соцсети'
-        WHEN 'organic'       THEN 'Органика'
-        WHEN 'vk_ads'        THEN 'Реклама ВКонтакте'
-        WHEN 'email'         THEN 'Email-рассылка'
-        WHEN 'referral'      THEN 'Рефералы'
-        WHEN 'yandex_direct' THEN 'Яндекс.Директ'
-        ELSE {col}
-    END"""
-
-# P2-06. Словари, которые до этого дублировались inline в form_data чартов.
-ORDER_STATUS_RU_CASE = """CASE status
-        WHEN 'new'              THEN 'Новый'
-        WHEN 'paid'             THEN 'Оплачен'
-        WHEN 'shipped'          THEN 'Отправлен'
-        WHEN 'ready_for_pickup' THEN 'Готов к выдаче'
-        WHEN 'delivered'        THEN 'Доставлен'
-        WHEN 'cancelled'        THEN 'Отменён'
-        WHEN 'refunded'         THEN 'Возврат средств'
-        WHEN 'returned'         THEN 'Возврат товара'
-        ELSE status
-    END"""
-
-PAYMENT_STATUS_RU_CASE = """CASE status
-        WHEN 'success'  THEN 'Успешно'
-        WHEN 'refunded' THEN 'Возврат'
-        WHEN 'failed'   THEN 'Отклонён'
-        ELSE status
-    END"""
-
-PAYMENT_METHOD_RU_CASE = """CASE payment_method
-        WHEN 'card'    THEN 'Карта'
-        WHEN 'cash'    THEN 'Наличные'
-        WHEN 'sbp'     THEN 'СБП'
-        WHEN 'mir_pay' THEN 'Mir Pay'
-        ELSE payment_method
-    END"""
 
 
 # ---------------------------------------------------------------------------
@@ -335,228 +279,57 @@ def sort_by_first_metric(label: str) -> dict[str, Any]:
 # Патчи витрин
 # ---------------------------------------------------------------------------
 
-DATASET_SQL: dict[str, dict[str, str]] = {
-    # P0-01. customers и payments были physical — без дедупликации
-    # ReplacingMergeTree. Платёж после рефанда переиздаётся под тем же
-    # payment_id, поэтому без FINAL он считался дважды.
+# Датасеты Superset и витрины, на которые они смотрят. SQL здесь больше
+# нет: он живёт в clickhouse_marts.sql как объекты хранилища. Имя
+# датасета = имя витрины, схема у всех одна (MARTS_SCHEMA), поэтому
+# таблица ниже — это список, а не отображение.
+#
+# phase сохранён: витрины фазы p0 должны появиться раньше чартов, которые
+# на их колонки ссылаются.
+DATASETS: dict[str, dict[str, str]] = {
     "customers": {
         "phase": "p0",
-        "note": "P0-01 FINAL для customers + P2-06 словарь каналов",
-        "sql": f"""
-SELECT
-    *,
-    {CHANNEL_RU_CASE.format(col="acquisition_channel")} AS acquisition_channel_ru
-FROM marketplace_analytics.customers FINAL
-""".strip(),
+        "note": "P0-01 FINAL + P2-06 словарь каналов",
+    },
+    "orders": {
+        "phase": "p0",
+        "note": "P0-01 FINAL + P2-06 словарь статусов + P0-03 is_mature",
     },
     "payments": {
         "phase": "p0",
-        "note": "P0-01 FINAL для payments + P2-06 словари статуса и способа",
-        "sql": f"""
-SELECT
-    *,
-    {PAYMENT_STATUS_RU_CASE} AS status_ru,
-    {PAYMENT_METHOD_RU_CASE} AS payment_method_ru
-FROM marketplace_analytics.payments FINAL
-""".strip(),
+        "note": "P0-01 FINAL + P2-06 словари статуса и способа оплаты",
     },
-    # P2-06. Словарь статусов переезжает в витрину: до этого один и тот же
-    # CASE был переписан заново в form_data каждого чарта, и версии уже
-    # разошлись между собой. Фаза p0, потому что чарты фазы p0 уже
-    # ссылаются на status_ru — колонка должна появиться раньше них.
-    "orders": {
-        "phase": "p0",
-        "note": "P2-06 словарь статусов + P0-03 признак зрелости заказа",
-        "sql": f"""
-SELECT
-    *,
-    {ORDER_STATUS_RU_CASE} AS status_ru,
-    {MATURE_ORDERS} AS is_mature
-FROM marketplace_analytics.orders FINAL
-""".strip(),
-    },
-    # P0-03. Воронка считалась по всем заказам, включая недельной свежести,
-    # которые физически не успели доехать.
     "order_funnel_stages": {
         "phase": "p0",
         "note": "P0-03 воронка только по зрелым заказам",
-        "sql": f"""
-SELECT 'Создано' AS stage, 1 AS stage_order, count() AS cnt
-FROM {ORDERS} WHERE {MATURE_ORDERS}
-UNION ALL
-SELECT 'Оплачено', 2, countIf(paid_at IS NOT NULL)
-FROM {ORDERS} WHERE {MATURE_ORDERS}
-UNION ALL
-SELECT 'Отправлено', 3, countIf(shipped_at IS NOT NULL)
-FROM {ORDERS} WHERE {MATURE_ORDERS}
-UNION ALL
-SELECT 'Готово к выдаче', 4, countIf(ready_for_pickup_at IS NOT NULL)
-FROM {ORDERS} WHERE {MATURE_ORDERS}
-UNION ALL
-SELECT 'Доставлено', 5, countIf(delivered_at IS NOT NULL)
-FROM {ORDERS} WHERE {MATURE_ORDERS}
-""".strip(),
     },
-    # P0-02 + P1-11. Витрина не отдавала признаков оплаты, поэтому GMV по
-    # городам и каналам считался по всем заказам; канал отдавался сырым
-    # enum'ом, хотя рядом на вкладке пирог показывал русские подписи.
     "orders_with_customer_dim": {
         "phase": "p0",
         "note": "P0-02 признаки оплаты + P1-11 русский канал",
-        "sql": f"""
-SELECT
-    o.order_id            AS order_id,
-    o.created_at          AS created_at,
-    o.amount_kopecks      AS amount_kopecks,
-    o.status              AS status,
-    o.paid_at             AS paid_at,
-    o.cancelled_at        AS cancelled_at,
-    o.refunded_at         AS refunded_at,
-    c.city                AS city,
-    c.acquisition_channel AS acquisition_channel,
-    {CHANNEL_RU_CASE.format(col="c.acquisition_channel")} AS acquisition_channel_ru,
-    o.{MATURE_ORDERS} AS is_mature
-FROM marketplace_analytics.orders AS o FINAL
-LEFT JOIN marketplace_analytics.customers AS c FINAL
-       ON c.customer_id = o.customer_id
-""".strip(),
     },
-    # P0-05. Признак зрелости клиента, чтобы конверсия считалась по когорте
-    # с полным горизонтом наблюдения.
     "customer_first_order": {
         "phase": "p0",
-        "note": "P0-05 признак зрелой когорты",
-        "sql": f"""
-SELECT
-    c.customer_id       AS customer_id,
-    c.registration_date AS registration_date,
-    min(o.created_at)   AS first_order_at,
-    dateDiff('day', c.registration_date, min(o.created_at)) AS days_to_first_order,
-    c.registration_date < (SELECT max(created_at) - INTERVAL 30 DAY FROM {ORDERS})
-        AS is_mature
-FROM marketplace_analytics.customers AS c FINAL
-LEFT JOIN marketplace_analytics.orders AS o FINAL
-       ON o.customer_id = c.customer_id
-GROUP BY c.customer_id, c.registration_date
-""".strip(),
+        "note": "P0-05 признак зрелой когорты покупателей",
     },
-    # P2-04. Разбивка DQ-ошибок была всевременной и не фильтровалась периодом.
-    "dq_reason_breakdown": {
-        "phase": "p2",
-        "note": "P2-04 load_date в разбивку DQ-ошибок",
-        "sql": """
-SELECT
-  CASE reason
-    WHEN 'CUSTOMER_NOT_FOUND' THEN 'Покупатель не найден'
-    WHEN 'CANCELLATION_REASON_INCONSISTENT'
-        THEN 'Причина отмены не соответствует статусу'
-    WHEN 'ORDER_NOT_FOUND' THEN 'Заказ не найден'
-    WHEN 'REFUND_TIMELINE_INVALID' THEN 'Некорректные сроки возврата'
-    WHEN 'CUSTOMER_ID_EMPTY' THEN 'Пустой ID покупателя'
-    WHEN 'ORDER_AMOUNT_INVALID' THEN 'Некорректная сумма заказа'
-    WHEN 'PAYMENT_AMOUNT_INVALID' THEN 'Некорректная сумма платежа'
-    WHEN 'ORDER_STATUS_INVALID' THEN 'Некорректный статус заказа'
-    WHEN 'PAYMENT_ID_DUPLICATE_IN_LOAD' THEN 'Дубликат ID платежа в загрузке'
-    WHEN 'PAYMENT_STATUS_INVALID' THEN 'Некорректный статус платежа'
-    WHEN 'PAYMENT_BEFORE_ORDER' THEN 'Платёж раньше заказа'
-    WHEN 'REGISTRATION_DATE_INVALID' THEN 'Некорректная дата регистрации'
-    WHEN 'CUSTOMER_ID_DUPLICATE_IN_LOAD' THEN 'Дубликат ID покупателя в загрузке'
-    WHEN 'CUSTOMER_ID_DUPLICATE_IN_HISTORY' THEN 'Дубликат ID покупателя в истории'
-    WHEN 'ORDER_ID_DUPLICATE_IN_LOAD' THEN 'Дубликат ID заказа в загрузке'
-    ELSE reason
-  END AS reason,
-  load_date,
-  quarantined_rows
-FROM (
-  SELECT
-      arrayJoin(splitByString(' | ', dq_reason)) AS reason,
-      load_date,
-      count() AS quarantined_rows
-  FROM (
-      SELECT dq_reason, load_date FROM marketplace_analytics.quarantine_customers
-      UNION ALL
-      SELECT dq_reason, load_date FROM marketplace_analytics.quarantine_orders
-      UNION ALL
-      SELECT dq_reason, load_date FROM marketplace_analytics.quarantine_payments
-  )
-  GROUP BY reason, load_date
-)
-""".strip(),
-    },
-}
-
-
-NEW_DATASETS: dict[str, dict[str, str]] = {
-    # P0-04. Замена «среднему по дате регистрации», которое рисовало арку
-    # окна наблюдения вместо поведения клиентов.
     "first_order_delay_distribution": {
         "phase": "p0",
         "note": "P0-04 распределение задержки первого заказа",
-        "sql": f"""
-SELECT days_to_first_order, count() AS customers
-FROM (
-    SELECT
-        c.customer_id AS customer_id,
-        dateDiff('day', c.registration_date, min(o.created_at))
-            AS days_to_first_order
-    FROM marketplace_analytics.customers AS c FINAL
-    INNER JOIN marketplace_analytics.orders AS o FINAL
-            ON o.customer_id = c.customer_id
-    WHERE c.{MATURE_REGISTRATION}
-    GROUP BY c.customer_id, c.registration_date
-)
-WHERE days_to_first_order >= 0
-GROUP BY days_to_first_order
-ORDER BY days_to_first_order
-""".strip(),
     },
-    # P0-06. Сырые длительности вместо AVG, чтобы перцентили считались по
-    # заказам, а не по дневным средним.
     "refund_processing_times": {
         "phase": "p0",
         "note": "P0-06 сырые длительности обработки рефанда",
-        "sql": f"""
-SELECT
-    order_id,
-    refunded_at,
-    if(cancelled_at IS NOT NULL, 'Отмена', 'Возврат товара') AS refund_kind,
-    dateDiff('second', coalesce(cancelled_at, returned_at), refunded_at)
-        AS duration_seconds
-FROM {ORDERS}
-WHERE refunded_at IS NOT NULL
-  AND coalesce(cancelled_at, returned_at) IS NOT NULL
-  AND refunded_at >= coalesce(cancelled_at, returned_at)
-""".strip(),
     },
-    # P2-04. Свежесть пайплайна: _load_commits пишется только после того,
-    # как все таблицы за load_date догружены целиком.
-    "load_freshness": {
+    "dq_reason_breakdown": {
         "phase": "p2",
-        "note": "P2-04 свежесть загрузки из _load_commits",
-        "sql": """
-SELECT
-    max(load_date) AS last_load_date,
-    dateDiff('hour', max(loaded_at), now()) AS hours_since_load,
-    count() AS entities_loaded
-FROM marketplace_analytics._load_commits
-WHERE load_date = (
-    SELECT max(load_date) FROM marketplace_analytics._load_commits
-)
-""".strip(),
+        "note": "P2-04 разбивка DQ-ошибок с load_date",
     },
     "quarantine_volume": {
         "phase": "p2",
         "note": "P2-04 объём карантина по дням и сущностям",
-        "sql": """
-SELECT load_date, 'Покупатели' AS entity, count() AS quarantined_rows
-FROM marketplace_analytics.quarantine_customers GROUP BY load_date
-UNION ALL
-SELECT load_date, 'Заказы', count()
-FROM marketplace_analytics.quarantine_orders GROUP BY load_date
-UNION ALL
-SELECT load_date, 'Платежи', count()
-FROM marketplace_analytics.quarantine_payments GROUP BY load_date
-""".strip(),
+    },
+    "load_freshness": {
+        "phase": "p2",
+        "note": "P2-04 свежесть загрузки из _load_commits",
     },
 }
 
@@ -1027,44 +800,61 @@ class Runner:
 
     # --- витрины -------------------------------------------------------
 
-    def patch_datasets(self, phases: set[str]) -> None:
-        for name, spec in DATASET_SQL.items():
+    def sync_datasets(self, phases: set[str]) -> None:
+        """Переводит датасеты на витрины ClickHouse.
+
+        Существующий датасет не пересоздаётся и не переименовывается, а
+        переключается на витрину: sql=None делает его физическим, схема
+        меняется на marketplace_marts. Id датасета при этом сохраняется,
+        поэтому чарты, ссылающиеся на него, продолжают работать без
+        единой правки.
+
+        Идемпотентно: датасет, уже смотрящий на витрину, пропускается.
+        """
+        for name, spec in DATASETS.items():
             if spec["phase"] not in phases:
                 continue
+
             existing = self.datasets.get(name)
-            if not existing:
-                print(f"  ! витрина {name} не найдена — пропуск")
+
+            if existing is None:
+                self._create_dataset(name, spec)
                 continue
-            if " ".join(str(existing.get("sql") or "").split()) == " ".join(
-                spec["sql"].split()
-            ):
+
+            already_physical = not (existing.get("sql") or "").strip()
+            if already_physical and existing.get("schema") == MARTS_SCHEMA:
                 continue
-            self.log(f"{spec['note']}: витрина {name}")
+
+            self.log(f"{spec['note']}: витрина {name} -> {MARTS_SCHEMA}.{name}")
             if self.apply:
                 self.client.put(
-                    f"/api/v1/dataset/{existing['id']}", {"sql": spec["sql"]}
-                )
-                self.client.put(f"/api/v1/dataset/{existing['id']}/refresh", {})
-
-    def create_datasets(self, phases: set[str]) -> None:
-        database_id = self._database_id()
-        for name, spec in NEW_DATASETS.items():
-            if spec["phase"] not in phases:
-                continue
-            if name in self.datasets:
-                continue
-            self.log(f"{spec['note']}: новая витрина {name}")
-            if self.apply:
-                self.client.post(
-                    "/api/v1/dataset/",
+                    f"/api/v1/dataset/{existing['id']}",
                     {
-                        "database": database_id,
-                        "schema": "marketplace_analytics",
+                        "sql": None,
+                        "schema": MARTS_SCHEMA,
                         "table_name": name,
-                        "sql": spec["sql"],
                     },
                 )
-                self.datasets = self.client.datasets()
+                # Без refresh Superset продолжает показывать колонки,
+                # снятые со старого SQL: новых (status_ru, is_mature) в
+                # списке не будет, и чарты по ним не соберутся.
+                self.client.put(f"/api/v1/dataset/{existing['id']}/refresh", {})
+
+    def _create_dataset(self, name: str, spec: dict[str, str]) -> None:
+        self.log(f"{spec['note']}: новый датасет {MARTS_SCHEMA}.{name}")
+
+        if not self.apply:
+            return
+
+        self.client.post(
+            "/api/v1/dataset/",
+            {
+                "database": self._database_id(),
+                "schema": MARTS_SCHEMA,
+                "table_name": name,
+            },
+        )
+        self.datasets = self.client.datasets()
 
     def _database_id(self) -> int:
         orders = self.datasets.get("orders")
@@ -1495,8 +1285,7 @@ def main() -> int:
     runner = Runner(client, args.dashboard, args.apply)
 
     print("Витрины:")
-    runner.create_datasets(phases)
-    runner.patch_datasets(phases)
+    runner.sync_datasets(phases)
 
     print("\nЧарты:")
     runner.patch_charts(phases)

@@ -28,5 +28,6 @@
   "cancel_before_payment_rate": 0.02,
   "cancel_after_payment_rate": 0.01,
   "return_rate": 0.15,
-  "never_order_rate": 0.18
+  "never_order_rate": 0.18,
+  "customer_maturity_days": 30
 }
