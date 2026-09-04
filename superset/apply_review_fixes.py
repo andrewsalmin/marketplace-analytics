@@ -37,7 +37,9 @@ import argparse
 import copy
 import getpass
 import json
+import math
 import os
+import pathlib
 import re
 import sys
 from datetime import datetime, timezone
@@ -55,17 +57,48 @@ except ImportError:  # pragma: no cover - подсказка вместо тре
 
 ORDERS = "marketplace_analytics.orders FINAL"
 
-# P0-03. Заказ считается «зрелым», если с его создания прошло больше недели:
-# только тогда он успел отмениться, вернуться или доехать. Отсчёт от
-# максимума в данных, а не от now(), чтобы пайплайн можно было не трогать.
+# P0-03. Заказ считается «зрелым», когда он уже не может сменить статус.
+# Горизонт — сумма всех дедлайнов подряд, ровно как её считает
+# compute_lookback_days() в generate_data.py: на дефолтах это 34 дня, а
+# не круглая неделя. Разница существенная — отмена «не забрали вовремя»
+# срабатывает на 17-й день, возврат возможен вплоть до 34-го, так что
+# при недельной отсечке доля возвратов на правом краю всё равно была бы
+# занижена.
 #
+# Отсчёт от максимума в данных, а не от now(), чтобы остановленный
+# пайплайн не съедал график целиком.
+def _maturity_days() -> int:
+    """Горизонт закрытия заказа в днях — из growth_config.json.
+
+    Тот же файл читают backfill_history.sh, run_downstream_pipeline.sh и
+    Airflow DAG: бизнес-правила живут в одном месте, и дашборд не должен
+    заводить собственную копию дедлайнов.
+    """
+    config_path = pathlib.Path(__file__).resolve().parent.parent / "growth_config.json"
+    try:
+        cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 34  # дефолты generate_data.py, если конфиг недоступен
+    return (
+        math.ceil(cfg["payment_deadline_hours"] / 24)
+        + math.ceil(cfg["shipping_deadline_hours"] / 24)
+        + cfg["delivery_deadline_days"]
+        + cfg["pickup_deadline_days"]
+        + cfg["return_window_days"]
+        + math.ceil(cfg["refund_processing_hours"] / 24)
+    )
+
+
+MATURITY_DAYS = _maturity_days()
+
 # Выражение годится только внутри SQL витрины. В фильтре чарта его быть
 # не может: Superset отвергает подзапросы в custom SQL
 # (ALLOW_ADHOC_SUBQUERY=False) и рисует «Custom SQL fields cannot contain
 # sub-queries» вместо графика. Поэтому витрины отдают готовую колонку
 # is_mature, а чарты фильтруют по ней (MATURE_FILTER).
 MATURE_ORDERS = (
-    f"created_at < (SELECT max(created_at) - INTERVAL 7 DAY FROM {ORDERS})"
+    f"created_at < (SELECT max(created_at) - INTERVAL {MATURITY_DAYS} DAY "
+    f"FROM {ORDERS})"
 )
 
 MATURE_FILTER = ("is_mature = 1", "is_mature")
@@ -552,8 +585,9 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             "slice_name": "Динамика GMV",
             "description": (
                 "«Оплачено» — сумма заказов с paid_at. «Чистый» дополнительно "
-                "исключает отменённые и возвращённые. Последняя неделя "
-                "отрезана: заказы ещё не успели закрыться."
+                f"исключает отменённые и возвращённые. Последние "
+                f"{MATURITY_DAYS} дней отрезаны: заказ может менять статус "
+                "до истечения всех дедлайнов."
             ),
             "set": {
                 "metrics": [
@@ -583,8 +617,9 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             "note": "P0-03 зрелый хвост + P1-05 проценты",
             "slice_name": "Динамика долей отмен и возвратов",
             "description": (
-                "Доли считаются от числа созданных заказов. Последняя неделя "
-                "отрезана: свежий заказ ещё не успел отмениться или вернуться."
+                f"Доли считаются от числа созданных заказов. Последние "
+                f"{MATURITY_DAYS} дней отрезаны: свежий заказ ещё не успел "
+                "отмениться или вернуться."
             ),
             "set": {"y_axis_format": ".1%", **DATE_AXIS, **rolling_mean()},
             "filters": [MATURE_FILTER],
