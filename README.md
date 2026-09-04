@@ -1,12 +1,18 @@
-# Synthetic Marketplace Data Generator
+# Marketplace Analytics
 
-Генератор синтетических данных для MVP аналитической платформы —
-конкретно **маркетплейса с логистикой доставки через пункты выдачи**
-(модель в духе Ozon/Wildberries), не универсального e-commerce и не
-сетевой розницы. У сетевой розницы (Пятёрочка, Магнит) транзакция
-принципиально проще — покупка в моменте, без цепочки
-shipped→ready_for_pickup→delivered — это не частный случай данной
-модели, а другая модель, требующая своей state machine. Генератор
+MVP аналитической платформы маркетплейса целиком: синтетический
+источник данных, DQ-пайплайн на Spark, витрины в ClickHouse,
+ежедневное расписание в Airflow и дашборд в Superset. Слои разбираются
+по порядку в разделах «Полный прогон» и «Архитектура» ниже.
+
+## Генератор данных
+
+Генератор моделирует конкретно **маркетплейс с логистикой доставки
+через пункты выдачи** (модель в духе Ozon/Wildberries), а не
+универсальный e-commerce и не сетевую розницу. У сетевой розницы
+(Пятёрочка, Магнит) транзакция принципиально проще — покупка в моменте,
+без цепочки shipped→ready_for_pickup→delivered — это не частный случай
+данной модели, а другая модель, требующая своей state machine. Генератор
 имитирует ежедневную выгрузку `customers` / `orders` / `payments` из
 учётной системы (АС) в виде CSV-партиций, с контролируемой инжекцией
 DQ-ошибок для тестирования пайплайнов и дашбордов качества данных.
@@ -91,10 +97,11 @@ Host/port/database/user (без пароля — он нигде в репози
 ./backfill_history.sh
 ```
 
-92 дня (2026-06-01 → 2026-08-31, весь летний сезон), рампа объёма 27 дней + плато. Форма
-кривой и диапазон дат — константы в начале скрипта, меняются на месте.
-При сбое посреди прогона — `./backfill_history.sh <день>` (см.
-комментарий в шапке скрипта).
+Диапазон дат, форма кривой (рампа + плато) и бизнес-правила —
+`growth_config.json`, единый источник правды для этого скрипта,
+`run_downstream_pipeline.sh` и Airflow DAG'а; на дефолтах это 95 дней,
+2026-06-01 → 2026-09-03. При сбое посреди прогона —
+`./backfill_history.sh <день>` (см. комментарий в шапке скрипта).
 
 Помимо объёма, скрипт передаёт `--launch-date`, включающую отдельную
 (более быструю, 21 день) динамику `error_rate` — см. «Реалистичная
@@ -103,8 +110,13 @@ Host/port/database/user (без пароля — он нигде в репози
 **4. Прогнать вниз по пайплайну (raw → clean/quarantine → ClickHouse)**
 
 ```bash
-./run_downstream_pipeline.sh "$CLICKHOUSE_PASSWORD"
+./run_downstream_pipeline.sh
 ```
+
+Пароль ClickHouse берётся из `CLICKHOUSE_PASSWORD` (той же переменной,
+что читает `docker-compose.yml`), а если её нет — скрипт спросит его
+скрытым вводом. В аргументах командной строки пароль не передаётся:
+оттуда он попадает в историю оболочки и в список процессов.
 
 Для каждого дня: `ingest_csv_to_raw.py` → `transform.py` →
 `load_to_clickhouse.py`. Загрузка в ClickHouse идемпотентна (см.
@@ -119,11 +131,11 @@ SSH-сессии получит `SIGHUP` и оборвётся при закры
 ```bash
 # tmux/screen — можно вернуться и посмотреть прогресс
 tmux new -s pipeline
-./run_downstream_pipeline.sh "$CLICKHOUSE_PASSWORD"
+./run_downstream_pipeline.sh
 # отключиться: Ctrl+B, затем D; вернуться: tmux attach -t pipeline
 
 # либо nohup + фон
-nohup ./run_downstream_pipeline.sh "$CLICKHOUSE_PASSWORD" > pipeline.log 2>&1 &
+nohup ./run_downstream_pipeline.sh > pipeline.log 2>&1 &
 disown
 # прогресс: tail -f pipeline.log
 ```
@@ -134,9 +146,11 @@ disown
 ```bash
 python load_to_clickhouse.py \
   --load-date 2026-07-28 \
-  --clickhouse-password "$CLICKHOUSE_PASSWORD" \
   --force-reload
 ```
+
+Пароль здесь тоже берётся из `CLICKHOUSE_PASSWORD`; флаг
+`--clickhouse-password` остался для разовых ручных запусков.
 
 **Проверить, что реально загружено:**
 
@@ -145,6 +159,31 @@ docker exec -it analytics-clickhouse clickhouse-client \
   --user analytics_user --password "$CLICKHOUSE_PASSWORD" \
   --query "SELECT load_date, entity, rows, loaded_at FROM marketplace_analytics._load_commits ORDER BY load_date"
 ```
+
+**5. Дашборд в Superset (опционально)**
+
+Витрины и чарты дашборда «Аналитика маркетплейса» живут в самом
+Superset, а не в этом репозитории; `superset/apply_review_fixes.py`
+приводит их к целевому состоянию через REST API — идемпотентно, с
+предварительной выгрузкой текущего состояния для отката. Подробности —
+в [`superset/README.md`](superset/README.md).
+
+## Структура репозитория
+
+| Путь | Слой |
+| --- | --- |
+| `generate_data.py` | Генератор source-слоя: CSV-выгрузка учётной системы с инжекцией DQ-ошибок |
+| `ingest_csv_to_raw.py` | source → raw: CSV в Parquet-партиции, без исправления данных |
+| `transform.py` | raw → clean / quarantine + `dq_metrics` (Spark) |
+| `load_to_clickhouse.py` | clean / quarantine → ClickHouse, идемпотентно по `load_date` |
+| `clickhouse_schema.sql` | Схема ClickHouse, применяется автоматически при загрузке |
+| `backfill_history.sh` | Разовая генерация истории по кривой роста |
+| `run_downstream_pipeline.sh` | Разовый прогон raw → ClickHouse за тот же диапазон |
+| `dags/daily_marketplace_pipeline.py` | Те же четыре шага на ежедневном расписании Airflow |
+| `growth_config.json` | Бизнес-параметры: диапазон дат, кривая роста, дедлайны, вероятности |
+| `clickhouse_config.json` | Параметры подключения к ClickHouse (без пароля) |
+| `superset/` | Приведение дашборда в Superset к целевому состоянию |
+| `tests/` | Тесты генератора (`pytest`) |
 
 ## Архитектура
 
