@@ -1212,9 +1212,13 @@ class Runner:
 
         Раскладка хранит собственную копию имени и показывает её, а не
         имя чарта, — без этой синхронизации переименование видно только
-        в списке чартов, но не на дашборде. Осмысленные ручные подписи
-        («Заказы по дням» на обзоре) не трогаются: заменяется лишь то,
-        что дословно совпало со старым именем.
+        в списке чартов, но не на дашборде. Копий две: sliceName и
+        sliceNameOverride, причём показывается вторая, если она задана,
+        так что обновлять надо обе.
+
+        Осмысленные ручные подписи («Заказы по дням» на обзоре) не
+        трогаются: заменяется лишь то, что дословно совпало со старым
+        именем чарта.
         """
         renamed = {
             old: patch["slice_name"]
@@ -1224,9 +1228,10 @@ class Runner:
         for node in position.values():
             if not isinstance(node, dict) or node.get("type") != "CHART":
                 continue
-            current = node.get("meta", {}).get("sliceName")
-            if current in renamed:
-                node["meta"]["sliceName"] = renamed[current]
+            meta = node.get("meta", {})
+            for field in ("sliceName", "sliceNameOverride"):
+                if meta.get(field) in renamed:
+                    meta[field] = renamed[meta[field]]
 
     def _rename_tabs(self, position: dict[str, Any]) -> None:
         for tab_id, title in TAB_NAMES.items():
