@@ -13,12 +13,24 @@
 ```bash
 pip install requests
 
-export SUPERSET_URL=http://superset.example.com:8088
-export SUPERSET_USERNAME=admin
-export SUPERSET_PASSWORD=...
+python superset/apply_review_fixes.py --url http://superset.example.com:8088 \
+    --username admin --phases p0,p1,p2
+```
 
-python superset/apply_review_fixes.py --phases p0,p1,p2            # план
-python superset/apply_review_fixes.py --phases p0,p1,p2 --apply    # запись
+Пароль скрипт спросит скрытым вводом. Передавать его в командной строке
+не нужно: оттуда он попадает в историю оболочки и в список процессов.
+Для CI, где спрашивать некого, остались `SUPERSET_PASSWORD` и
+`--password`; если пароля нет, а ввод или вывод перенаправлены, скрипт
+скажет об этом и выйдет, а не повиснет на приглашении.
+
+Показанное выше — только план. Чтобы записать изменения, добавь
+`--apply`.
+
+В PowerShell перенос строки — обратная кавычка, а не `\`, и питон
+удобнее звать из venv:
+
+```powershell
+.\venv\Scripts\python.exe superset\apply_review_fixes.py --url http://superset.example.com:8088 --username admin --phases p0,p1,p2
 ```
 
 Фазы можно применять по одной (`--phases p0`), но порядок важен:

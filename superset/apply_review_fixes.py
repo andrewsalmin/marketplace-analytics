@@ -13,12 +13,13 @@
 
 По умолчанию ничего не пишется — печатается план. Применение:
 
-    export SUPERSET_URL=http://superset.example.com:8088
-    export SUPERSET_USERNAME=admin
-    export SUPERSET_PASSWORD=...
+    python superset/apply_review_fixes.py --username admin --phases p0
+        --url http://superset.example.com:8088
 
-    python superset/apply_review_fixes.py --phases p0            # план
-    python superset/apply_review_fixes.py --phases p0 --apply    # запись
+Пароль скрипт спросит скрытым вводом — в командной строке его лучше не
+передавать, оттуда он попадает в историю оболочки и в список процессов.
+Для CI, где спросить некого, есть SUPERSET_PASSWORD и --password.
+Добавь --apply, чтобы вместо плана записать изменения.
 
 Перед первой записью скрипт выгружает текущее состояние дашборда в
 ./superset_backup_<timestamp>.zip — это и есть путь отката (импорт ZIP
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import getpass
 import json
 import os
 import re
@@ -138,6 +140,12 @@ class Superset:
             },
             timeout=30,
         )
+        if resp.status_code == 401:
+            raise SupersetError(
+                f"Superset не принял пару «{username}» + пароль. Проверь её "
+                "в веб-интерфейсе: это должна быть учётка Superset, а не "
+                "сервера или базы."
+            )
         if resp.status_code != 200:
             raise SupersetError(f"Логин не прошёл: {resp.status_code} {resp.text}")
         self.session.headers["Authorization"] = f"Bearer {resp.json()['access_token']}"
@@ -1338,18 +1346,38 @@ def main() -> int:
     parser.add_argument("--password", default=os.environ.get("SUPERSET_PASSWORD"))
     args = parser.parse_args()
 
-    if not (args.url and args.username and args.password):
+    if not (args.url and args.username):
         return _fail(
-            "Нужны SUPERSET_URL, SUPERSET_USERNAME, SUPERSET_PASSWORD "
-            "(или --url/--username/--password)"
+            "Нужны SUPERSET_URL и SUPERSET_USERNAME (или --url/--username)"
         )
+
+    # Пароль в командной строке оседает в истории оболочки и виден в
+    # списке процессов, поэтому по умолчанию спрашиваем его скрытым
+    # вводом. --password и SUPERSET_PASSWORD остаются для CI, где
+    # интерактивного ввода нет.
+    password = args.password
+    if not password:
+        # Проверяются оба потока: на Windows stdin.isatty() возвращает
+        # True даже при перенаправленном вводе, и на одном stdin скрипт
+        # молча вис бы на приглашении вместо внятной ошибки.
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return _fail(
+                "Пароль не задан, а спросить его негде (ввод или вывод "
+                "перенаправлены): передай SUPERSET_PASSWORD или --password"
+            )
+        try:
+            password = getpass.getpass(f"Пароль {args.username} в Superset: ")
+        except (EOFError, KeyboardInterrupt):
+            return _fail("Ввод пароля прерван")
+    if not password:
+        return _fail("Пустой пароль")
 
     phases = {p.strip().lower() for p in args.phases.split(",") if p.strip()}
     unknown = phases - {"p0", "p1", "p2"}
     if unknown:
         return _fail(f"Неизвестные фазы: {', '.join(sorted(unknown))}")
 
-    client = Superset(args.url, args.username, args.password)
+    client = Superset(args.url, args.username, password)
 
     if args.apply:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1390,4 +1418,10 @@ def _fail(message: str) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # Ошибки API — это нормальный исход (не тот пароль, недоступный
+    # сервер), а не дефект скрипта: сообщение полезнее трейсбека.
+    try:
+        exit_code = main()
+    except SupersetError as exc:
+        exit_code = _fail(str(exc))
+    raise SystemExit(exit_code)
