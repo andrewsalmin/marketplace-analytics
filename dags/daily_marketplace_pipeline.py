@@ -20,17 +20,24 @@ Airflow Connection `clickhouse_default` (поле password), которую ну
 Порядок дней важен и здесь: generate_data.py накапливает клиентов между
 запусками (load_existing_customers), а transform.py проверяет дубли
 customer_id относительно уже обработанной истории (read_historical_keys).
-Поэтому max_active_runs=1 — DAG-раны идут строго последовательно, day N+1
-не стартует, пока day N не завершился (успешно или с ошибкой).
+Отсюда две настройки, а не одна: max_active_runs=1 не даёт дням идти
+параллельно, а depends_on_past=True не даёт day N+1 стартовать после
+УПАВШЕГО day N. Без второй настройки пропуск дня посреди истории
+разошёлся бы тихо: генератор не увидел бы клиентов пропущенного дня, а
+у части заказов не оказалось бы дня, в который они должны были
+продвинуться по state machine.
 """
 import json
+import logging
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from airflow.decorators import dag, task
 from airflow.hooks.base import BaseHook
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = str(REPO_ROOT / "data")
@@ -123,17 +130,56 @@ def _run(args: list[str], env: dict[str, str] | None = None) -> None:
     )
 
 
+def _alert_on_failure(context: dict) -> None:
+    """Единая точка подключения алертинга.
+
+    Сейчас пишет структурированную запись в лог планировщика: рабочего
+    Slack/PagerDuty у этой установки нет, а email_on_failure без
+    настроенного SMTP молча ничего не делает и создаёт ложное ощущение,
+    что уведомления есть. Интеграция подключается здесь, не трогая сами
+    задачи.
+    """
+    task_instance = context.get("task_instance")
+    logger.error(
+        "Задача %s упала на logical_date=%s (попытка %s): %s",
+        getattr(task_instance, "task_id", "?"),
+        context.get("ds"),
+        getattr(task_instance, "try_number", "?"),
+        context.get("exception"),
+    )
+
+
+# retries по умолчанию — 2: сеть до Maven Central, старт Spark и HTTP до
+# ClickHouse отваливаются достаточно часто, чтобы одна повторная попытка
+# окупалась. Задачи, для которых повтор НЕ безопасен, переопределяют это
+# у себя (см. ingest).
+DEFAULT_ARGS = {
+    "owner": "data-platform",
+    "depends_on_past": True,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+    "email_on_failure": False,
+    "on_failure_callback": _alert_on_failure,
+}
+
+
 @dag(
     dag_id="daily_marketplace_pipeline",
     schedule="@daily",
     start_date=START_DATE,
     catchup=False,
     max_active_runs=1,
+    default_args=DEFAULT_ARGS,
+    doc_md=__doc__,
     tags=["marketplace"],
 )
 def daily_marketplace_pipeline():
 
-    @task
+    # Повтор безопасен: publish_batch() атомарен (либо сущности +
+    # commit-маркер оказываются в source_root, либо не остаётся следов
+    # этого load_date), так что упавшая попытка ничего за собой не
+    # оставляет.
+    @task(execution_timeout=timedelta(hours=1))
     def generate(ds: str) -> None:
         load_date = datetime.fromisoformat(ds)
         day_index = (load_date.date() - START_DATE.date()).days
@@ -170,7 +216,12 @@ def daily_marketplace_pipeline():
             *business_rules,
         ])
 
-    @task
+    # retries=0 намеренно: ingest_csv_to_raw.py не идемпотентен —
+    # ensure_not_exists() запрещает перезапись, а отката уже записанных
+    # партиций у него нет. Если он упал на второй из трёх сущностей,
+    # повтор гарантированно упадёт снова с "партиция уже существует" и
+    # только съест retry_delay. Такой день чинится руками.
+    @task(retries=0, execution_timeout=timedelta(minutes=30))
     def ingest(ds: str) -> None:
         _run([
             PYTHON_BIN, "ingest_csv_to_raw.py",
@@ -178,7 +229,9 @@ def daily_marketplace_pipeline():
             "--data-dir", DATA_DIR,
         ])
 
-    @task
+    # Повтор безопасен: clean/quarantine пишутся в mode("overwrite") по
+    # своей партиции load_date.
+    @task(execution_timeout=timedelta(hours=3))
     def transform(ds: str) -> None:
         _run([
             PYTHON_BIN, "transform.py",
@@ -186,7 +239,9 @@ def daily_marketplace_pipeline():
             "--data-dir", DATA_DIR,
         ])
 
-    @task
+    # Повтор безопасен: маркер _load_commits пишется последним, и уже
+    # загруженный день превращается в no-op (is_load_date_committed).
+    @task(execution_timeout=timedelta(hours=3))
     def load(ds: str) -> None:
         # Пароль читается из Airflow Connection, а не из growth_config.json/
         # clickhouse_config.json — не оседает ни в git, ни в рендере
