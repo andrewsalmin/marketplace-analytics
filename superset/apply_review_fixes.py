@@ -804,6 +804,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                         "color": "#E04355",
                         "show": True,
                         "showLabel": True,
+                        "showMarkers": False,
                         "hideLine": False,
                     }
                 ],
@@ -1044,7 +1045,10 @@ class Runner:
         for name, patch in chart_patches().items():
             if patch["phase"] not in phases:
                 continue
-            chart = charts.get(name)
+            # Искать надо и по новому имени: после первого прогона чарт
+            # называется уже так, как его переименовал сам скрипт, и по
+            # исходному ключу не находится.
+            chart = charts.get(name) or charts.get(patch.get("slice_name", ""))
             if not chart:
                 print(f"  ! чарт «{name}» не найден — пропуск")
                 continue
@@ -1174,6 +1178,9 @@ class Runner:
             json.dumps(metadata, sort_keys=True),
         )
 
+        # Синхронизация подписей нужна после любой фазы, которая
+        # переименовывает чарты, — а это и p0, и p1.
+        self._sync_slice_names(position)
         if "p1" in phases:
             self._rename_tabs(position)
         if "p2" in phases:
@@ -1198,6 +1205,28 @@ class Runner:
                     "json_metadata": json.dumps(metadata, ensure_ascii=False),
                 },
             )
+
+    @staticmethod
+    def _sync_slice_names(position: dict[str, Any]) -> None:
+        """Подтягивает подписи чартов в раскладке за их новыми именами.
+
+        Раскладка хранит собственную копию имени и показывает её, а не
+        имя чарта, — без этой синхронизации переименование видно только
+        в списке чартов, но не на дашборде. Осмысленные ручные подписи
+        («Заказы по дням» на обзоре) не трогаются: заменяется лишь то,
+        что дословно совпало со старым именем.
+        """
+        renamed = {
+            old: patch["slice_name"]
+            for old, patch in chart_patches().items()
+            if "slice_name" in patch
+        }
+        for node in position.values():
+            if not isinstance(node, dict) or node.get("type") != "CHART":
+                continue
+            current = node.get("meta", {}).get("sliceName")
+            if current in renamed:
+                node["meta"]["sliceName"] = renamed[current]
 
     def _rename_tabs(self, position: dict[str, Any]) -> None:
         for tab_id, title in TAB_NAMES.items():
