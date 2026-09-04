@@ -11,3 +11,6 @@ venv/
 
 # Локальные секреты для docker-compose (CLICKHOUSE_PASSWORD и т.п.).
 .env
+
+# Бэкапы Superset, которые apply_review_fixes.py снимает перед записью.
+/superset_backup_*.zip

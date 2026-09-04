@@ -1,13 +1,14 @@
 [project]
-name = "synthetic-ecommerce-data-generator"
+name = "marketplace-analytics"
 version = "3.0.0"
-description = "Synthetic customers/orders/payments CSV generator emulating a raw source-system export, with controlled DQ error injection."
+description = "Marketplace analytics MVP: synthetic source-system export with controlled DQ error injection, plus the raw/clean/quarantine pipeline into ClickHouse."
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dependencies = [
     "numpy>=1.26",
     "pandas>=2.1",
     "faker>=20.0",
+    "pyarrow>=14.0",
 ]
 
 [project.optional-dependencies]
