@@ -299,8 +299,10 @@ VOLUME_NOISE_SIGMA = 0.15
 # применяется, PAYMENT_SUCCESS_RATE остаётся ровно базовой константой.
 # ---------------------------------------------------------------------
 
-RAMP_PAYMENT_FAILURE_INITIAL_MULTIPLIER = 3.0  # во сколько раз выше доля отказов оплаты в день запуска
-RAMP_PAYMENT_FAILURE_DECAY_DAYS = 14  # платёжный процессинг обкатывается быстрее, чем DQ-интеграции
+# Во сколько раз выше доля отказов оплаты в день запуска площадки.
+RAMP_PAYMENT_FAILURE_INITIAL_MULTIPLIER = 3.0
+# Платёжный процессинг обкатывается быстрее, чем DQ-интеграции.
+RAMP_PAYMENT_FAILURE_DECAY_DAYS = 14
 
 PAYMENT_FAILURE_NOISE_SIGMA = 0.15  # логнормальный день-в-день джиттер вокруг тренда
 
@@ -961,7 +963,11 @@ def generate_customers(
     city_weights = np.array(CITY_WEIGHTS, dtype=float)
     city_weights = city_weights / city_weights.sum()
     cities = rng.choice(CITIES, size=count, p=city_weights)
-    channels = rng.choice(ACQUISITION_CHANNELS, size=count, p=ACQUISITION_CHANNEL_WEIGHTS)
+    channels = rng.choice(
+        ACQUISITION_CHANNELS,
+        size=count,
+        p=ACQUISITION_CHANNEL_WEIGHTS,
+    )
     emails = [fake.unique.email() for _ in range(count)]
 
     customer_ids = [f"cus_{load_date:%Y%m%d}_{i + 1:08d}" for i in range(count)]
