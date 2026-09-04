@@ -10,7 +10,7 @@ from datetime import date
 from pathlib import Path
 
 from pyspark import StorageLevel
-from pyspark.sql import SparkSession
+from pyspark.sql import Column, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
@@ -70,6 +70,112 @@ def add_dq_reason(df, checks):
         "dq_reason",
         F.concat_ws(" | ", *reason_columns),
     )
+
+
+# ---------------------------------------------------------------------
+# DQ-правила
+#
+# Вынесены из transform_* отдельно и намеренно не трогают ни файлы, ни
+# SparkSession: правило — это выражение над именами колонок, поэтому его
+# можно проверить на DataFrame из нескольких строк (см.
+# tests/test_transform_dq.py). Служебные колонки (duplicate_count,
+# exists_in_history, customer_exists, order_exists,
+# related_order_created_at) считают вызывающие функции — здесь они
+# считаются уже присутствующими.
+# ---------------------------------------------------------------------
+
+
+def _is_blank(column: str):
+    """NULL или строка из одних пробелов — для источника это одно и то же."""
+    return F.col(column).isNull() | (F.trim(F.col(column)) == "")
+
+
+def customer_dq_checks() -> list[tuple[Column, str]]:
+    return [
+        (_is_blank("customer_id"), "CUSTOMER_ID_EMPTY"),
+        (F.col("duplicate_count") > 1, "CUSTOMER_ID_DUPLICATE_IN_LOAD"),
+        (
+            F.col("exists_in_history").isNotNull(),
+            "CUSTOMER_ID_DUPLICATE_IN_HISTORY",
+        ),
+        (F.col("registration_date").isNull(), "REGISTRATION_DATE_INVALID"),
+    ]
+
+
+def order_dq_checks() -> list[tuple[Column, str]]:
+    normalized_status = F.lower(F.trim(F.col("status")))
+
+    # Причина отмены осмысленна только у cancelled/refunded, и наоборот:
+    # cancelled без причины — потерянный при выгрузке атрибут. Сравнение
+    # идёт с normalized_status, а не с сырым status: иначе источник,
+    # приславший "Cancelled", получал бы ORDER_STATUS_INVALID = нет (эта
+    # проверка регистронезависима), но CANCELLATION_REASON_INCONSISTENT
+    # = да, и причина отмены была бы объявлена лишней у корректно
+    # отменённого заказа.
+    cancellation_reason_inconsistent = (
+        F.col("cancellation_reason").isNotNull()
+        & (~normalized_status.isin(["cancelled", "refunded"]))
+    ) | (
+        (normalized_status == "cancelled")
+        & F.col("cancellation_reason").isNull()
+    )
+
+    # Деньги не могут вернуться раньше, чем заказ отменён или возвращён.
+    refunded_before_cancelled = F.col("cancelled_at").isNotNull() & (
+        F.col("refunded_at") < F.col("cancelled_at")
+    )
+    refunded_before_returned = F.col("returned_at").isNotNull() & (
+        F.col("refunded_at") < F.col("returned_at")
+    )
+    refund_timeline_invalid = F.col("refunded_at").isNotNull() & (
+        refunded_before_cancelled | refunded_before_returned
+    )
+
+    return [
+        (_is_blank("order_id"), "ORDER_ID_EMPTY"),
+        (F.col("duplicate_count") > 1, "ORDER_ID_DUPLICATE_IN_LOAD"),
+        (_is_blank("customer_id"), "CUSTOMER_ID_EMPTY"),
+        (F.col("customer_exists").isNull(), "CUSTOMER_NOT_FOUND"),
+        (F.col("created_at").isNull(), "CREATED_AT_INVALID"),
+        (
+            F.col("amount_kopecks").isNull() | (F.col("amount_kopecks") <= 0),
+            "ORDER_AMOUNT_INVALID",
+        ),
+        (
+            _is_blank("status")
+            | (~normalized_status.isin(VALID_ORDER_STATUSES)),
+            "ORDER_STATUS_INVALID",
+        ),
+        (cancellation_reason_inconsistent, "CANCELLATION_REASON_INCONSISTENT"),
+        (refund_timeline_invalid, "REFUND_TIMELINE_INVALID"),
+    ]
+
+
+def payment_dq_checks() -> list[tuple[Column, str]]:
+    normalized_status = F.lower(F.trim(F.col("status")))
+
+    return [
+        (_is_blank("payment_id"), "PAYMENT_ID_EMPTY"),
+        (F.col("duplicate_count") > 1, "PAYMENT_ID_DUPLICATE_IN_LOAD"),
+        (_is_blank("order_id"), "ORDER_ID_EMPTY"),
+        (F.col("order_exists").isNull(), "ORDER_NOT_FOUND"),
+        (F.col("payment_date").isNull(), "PAYMENT_DATE_INVALID"),
+        (
+            F.col("amount_kopecks").isNull() | (F.col("amount_kopecks") <= 0),
+            "PAYMENT_AMOUNT_INVALID",
+        ),
+        (
+            _is_blank("status")
+            | (~normalized_status.isin(VALID_PAYMENT_STATUSES)),
+            "PAYMENT_STATUS_INVALID",
+        ),
+        (
+            F.col("order_exists").isNotNull()
+            & F.col("payment_date").isNotNull()
+            & (F.col("payment_date") < F.col("related_order_created_at")),
+            "PAYMENT_BEFORE_ORDER",
+        ),
+    ]
 
 
 def split_valid_invalid(df):
@@ -234,28 +340,7 @@ def transform_customers(spark, raw_root, clean_root, quarantine_root, load_date)
             F.lit(None).cast("boolean"),
         )
 
-    customers = add_dq_reason(
-        customers,
-        [
-            (
-                F.col("customer_id").isNull() |
-                (F.trim(F.col("customer_id")) == ""),
-                "CUSTOMER_ID_EMPTY",
-            ),
-            (
-                F.col("duplicate_count") > 1,
-                "CUSTOMER_ID_DUPLICATE_IN_LOAD",
-            ),
-            (
-                F.col("exists_in_history").isNotNull(),
-                "CUSTOMER_ID_DUPLICATE_IN_HISTORY",
-            ),
-            (
-                F.col("registration_date").isNull(),
-                "REGISTRATION_DATE_INVALID",
-            ),
-        ],
-    ).drop(
+    customers = add_dq_reason(customers, customer_dq_checks()).drop(
         "duplicate_count",
         "exists_in_history",
     )
@@ -317,72 +402,7 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
         F.count("*").over(duplicate_window),
     )
 
-    normalized_status = F.lower(F.trim(F.col("status")))
-
-    cancellation_reason_inconsistent = (
-        F.col("cancellation_reason").isNotNull()
-        & (~F.col("status").isin(["cancelled", "refunded"]))
-    ) | (
-        (F.col("status") == "cancelled")
-        & F.col("cancellation_reason").isNull()
-    )
-
-    refunded_before_cancelled = F.col("cancelled_at").isNotNull() & (
-        F.col("refunded_at") < F.col("cancelled_at")
-    )
-    refunded_before_returned = F.col("returned_at").isNotNull() & (
-        F.col("refunded_at") < F.col("returned_at")
-    )
-    refund_timeline_invalid = F.col("refunded_at").isNotNull() & (
-        refunded_before_cancelled | refunded_before_returned
-    )
-
-    orders = add_dq_reason(
-        orders,
-        [
-            (
-                F.col("order_id").isNull() |
-                (F.trim(F.col("order_id")) == ""),
-                "ORDER_ID_EMPTY",
-            ),
-            (
-                F.col("duplicate_count") > 1,
-                "ORDER_ID_DUPLICATE_IN_LOAD",
-            ),
-            (
-                F.col("customer_id").isNull() |
-                (F.trim(F.col("customer_id")) == ""),
-                "CUSTOMER_ID_EMPTY",
-            ),
-            (
-                F.col("customer_exists").isNull(),
-                "CUSTOMER_NOT_FOUND",
-            ),
-            (
-                F.col("created_at").isNull(),
-                "CREATED_AT_INVALID",
-            ),
-            (
-                F.col("amount_kopecks").isNull() |
-                (F.col("amount_kopecks") <= 0),
-                "ORDER_AMOUNT_INVALID",
-            ),
-            (
-                F.col("status").isNull() |
-                (F.trim(F.col("status")) == "") |
-                (~normalized_status.isin(VALID_ORDER_STATUSES)),
-                "ORDER_STATUS_INVALID",
-            ),
-            (
-                cancellation_reason_inconsistent,
-                "CANCELLATION_REASON_INCONSISTENT",
-            ),
-            (
-                refund_timeline_invalid,
-                "REFUND_TIMELINE_INVALID",
-            ),
-        ],
-    ).drop(
+    orders = add_dq_reason(orders, order_dq_checks()).drop(
         "duplicate_count",
         "customer_exists",
     )
@@ -438,52 +458,7 @@ def transform_payments(spark, raw_root, clean_root, quarantine_root, load_date):
         F.count("*").over(duplicate_window),
     )
 
-    normalized_status = F.lower(F.trim(F.col("status")))
-
-    payments = add_dq_reason(
-        payments,
-        [
-            (
-                F.col("payment_id").isNull() |
-                (F.trim(F.col("payment_id")) == ""),
-                "PAYMENT_ID_EMPTY",
-            ),
-            (
-                F.col("duplicate_count") > 1,
-                "PAYMENT_ID_DUPLICATE_IN_LOAD",
-            ),
-            (
-                F.col("order_id").isNull() |
-                (F.trim(F.col("order_id")) == ""),
-                "ORDER_ID_EMPTY",
-            ),
-            (
-                F.col("order_exists").isNull(),
-                "ORDER_NOT_FOUND",
-            ),
-            (
-                F.col("payment_date").isNull(),
-                "PAYMENT_DATE_INVALID",
-            ),
-            (
-                F.col("amount_kopecks").isNull() |
-                (F.col("amount_kopecks") <= 0),
-                "PAYMENT_AMOUNT_INVALID",
-            ),
-            (
-                F.col("status").isNull() |
-                (F.trim(F.col("status")) == "") |
-                (~normalized_status.isin(VALID_PAYMENT_STATUSES)),
-                "PAYMENT_STATUS_INVALID",
-            ),
-            (
-                F.col("order_exists").isNotNull() &
-                F.col("payment_date").isNotNull() &
-                (F.col("payment_date") < F.col("related_order_created_at")),
-                "PAYMENT_BEFORE_ORDER",
-            ),
-        ],
-    ).drop(
+    payments = add_dq_reason(payments, payment_dq_checks()).drop(
         "duplicate_count",
         "order_exists",
         "related_order_created_at",

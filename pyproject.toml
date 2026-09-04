@@ -24,5 +24,10 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# pytest.importorskip("pyspark") обязан отработать до импортов pyspark,
+# поэтому импорты в этом файле не могут стоять в самом верху.
+"tests/test_transform_dq.py" = ["E402"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
