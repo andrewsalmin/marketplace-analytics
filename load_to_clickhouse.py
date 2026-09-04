@@ -1,6 +1,8 @@
 import argparse
 import base64
 import json
+import logging
+import os
 import urllib.error
 import urllib.request
 from datetime import date
@@ -8,6 +10,8 @@ from pathlib import Path
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+
+logger = logging.getLogger(__name__)
 
 # Все таблицы, партиционированные по load_date (см. clickhouse_schema.sql) —
 # именно этот список чистится через DROP PARTITION при --force-reload.
@@ -23,18 +27,19 @@ PARTITIONED_TABLES = [
 
 
 def load_clickhouse_defaults() -> dict:
-    """
-    host/port/database/user (без пароля — он никогда не хранится в
-    файле, передаётся только аргументом --clickhouse-password) — единый
-    источник правды в clickhouse_config.json, общий с
-    run_downstream_pipeline.sh и Airflow DAG'ом (daily_marketplace_pipeline),
-    чтобы подключение не расходилось между ручным запуском и пайплайном.
+    """Читает host/port/database/user из clickhouse_config.json.
+
+    Этот файл — единый источник правды для ручного запуска,
+    run_downstream_pipeline.sh и Airflow DAG'а, чтобы параметры
+    подключения не расходились между ними. Пароль в нём не хранится:
+    он приходит из переменной окружения CLICKHOUSE_PASSWORD (или, для
+    ручных запусков, из --clickhouse-password).
     """
     config_path = Path(__file__).parent / "clickhouse_config.json"
     return json.loads(config_path.read_text(encoding="utf-8"))
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     defaults = load_clickhouse_defaults()
 
     parser = argparse.ArgumentParser()
@@ -71,9 +76,13 @@ def parse_args():
         default=defaults["user"],
     )
 
+    # Пароль по умолчанию берётся из окружения, а не из аргумента:
+    # значение CLI-флага видно в списке процессов любому пользователю
+    # машины. run_downstream_pipeline.sh и Airflow DAG передают его
+    # именно переменной; флаг оставлен для ручных запусков.
     parser.add_argument(
         "--clickhouse-password",
-        required=True,
+        default=os.environ.get("CLICKHOUSE_PASSWORD"),
     )
 
     parser.add_argument(
@@ -96,21 +105,11 @@ def parse_args():
             "org.apache.httpcomponents.client5:httpclient5:5.3.1"
         ),
         help=(
-            "Maven-координаты JAR'ов для Spark (через запятую, идёт в "
-            "spark.jars.packages — этот механизм поддерживает только "
-            "3-частный формат groupId:artifactId:version, БЕЗ classifier "
-            "вроде ':all'). httpclient5 добавлен явно — без него "
-            "clickhouse-jdbc молча откатывается на встроенный Java "
-            "HttpURLConnection, который может не пережить чуть нестандартный "
-            "HTTP-ответ ClickHouse (споткнулись именно на этом на практике). "
-            "Версии connector/jdbc — 0.10.0, сверено с maven-metadata.xml "
-            "на Maven Central на момент отладки (мои изначальные версии по "
-            "памяти оказались устаревшими и давали рассинхрон по LZ4-сжатию "
-            "с ClickHouse 26.7). Без connector/jdbc SparkSession.builder "
-            "упадёт с ClassNotFoundException на "
-            "com.clickhouse.spark.ClickHouseCatalog. Если и эта версия "
-            "успела устареть на Maven Central, переопредели этим флагом, "
-            "без правки кода."
+            "Maven-координаты JAR'ов для Spark, через запятую. Уходят в "
+            "spark.jars.packages, который поддерживает только 3-частный "
+            "формат groupId:artifactId:version, без classifier вроде "
+            "':all'. Версии сверены с Maven Central; если они устареют, "
+            "новые задаются этим флагом, без правки кода."
         ),
     )
 
@@ -121,28 +120,32 @@ def parse_args():
     except ValueError:
         parser.error("--load-date должен быть в формате YYYY-MM-DD")
 
+    if not args.clickhouse_password:
+        parser.error(
+            "нужен пароль ClickHouse: переменная окружения "
+            "CLICKHOUSE_PASSWORD или --clickhouse-password"
+        )
+
     return args
 
 
 def ch_execute(args, sql: str, use_database: bool = True) -> str:
-    """
-    Выполняет произвольный SQL через HTTP-интерфейс ClickHouse (порт из
-    --clickhouse-port), в обход Spark — нужен для маркера идемпотентности
-    и DROP PARTITION до того, как вообще поднимается SparkSession (чтобы
-    no-op на уже загруженный load_date не тратил время на старт Spark и
-    резолв JAR'ов).
+    """Выполняет SQL через HTTP-интерфейс ClickHouse, в обход Spark.
+
+    Нужен для маркера идемпотентности и DROP PARTITION до старта
+    SparkSession: no-op на уже загруженный load_date не должен тратить
+    время на подъём Spark и резолв JAR'ов.
 
     use_database=False — для CREATE DATABASE IF NOT EXISTS на чистом
-    кластере: если передать ?database=marketplace_analytics до того, как
-    эта база вообще создана, ClickHouse откажет с "Database
-    marketplace_analytics doesn't exist" ещё до выполнения самого запроса.
+    кластере: с ?database=<имя> до создания самой базы ClickHouse
+    откажет с "Database ... doesn't exist" ещё до выполнения запроса.
     """
     url = f"http://{args.clickhouse_host}:{args.clickhouse_port}/"
     if use_database:
         url += f"?database={args.clickhouse_database}"
 
     credentials = base64.b64encode(
-        f"{args.clickhouse_user}:{args.clickhouse_password}".encode("utf-8")
+        f"{args.clickhouse_user}:{args.clickhouse_password}".encode()
     ).decode("ascii")
 
     request = urllib.request.Request(
@@ -199,18 +202,20 @@ def drop_existing_partitions(args) -> None:
             f"'{args.load_date}'",
         )
 
-    print(f"[RELOAD] Партиции load_date={args.load_date} сброшены "
-          f"по {len(PARTITIONED_TABLES)} таблицам.")
+    logger.info(
+        "[RELOAD] Dropped load_date=%s partitions across %d tables.",
+        args.load_date,
+        len(PARTITIONED_TABLES),
+    )
 
 
 def record_commit(args, entity_counts: dict[str, int]) -> None:
-    """
-    Пишется ПОСЛЕДНИМ шагом, только после того, как все таблицы за
-    load_date успешно загружены — тот же принцип, что commit.json в
-    generate_data.py (publish_batch): если упасть раньше этой записи,
-    is_load_date_committed() на следующем запуске честно скажет "не
-    загружено", и load_to_clickhouse.py просто догрузит день заново, а
-    не решит, что всё уже есть.
+    """Отмечает load_date как загруженный целиком.
+
+    Вызывается последним шагом, после успешной записи всех таблиц за
+    день — тот же принцип, что commit.json в publish_batch()
+    generate_data.py. Падение до этой записи оставляет день неотмеченным,
+    и следующий запуск догрузит его заново, а не сочтёт готовым.
     """
     values = ", ".join(
         f"('{args.load_date}', '{entity}', {count})"
@@ -223,8 +228,11 @@ def record_commit(args, entity_counts: dict[str, int]) -> None:
         f"{values}",
     )
 
-    print(f"[COMMIT] load_date={args.load_date} отмечен загруженным "
-          f"({sum(entity_counts.values()):,} строк суммарно).")
+    logger.info(
+        "[COMMIT] load_date=%s marked as loaded (%s rows total).",
+        args.load_date,
+        f"{sum(entity_counts.values()):,}",
+    )
 
 
 def read_parquet_partition(spark, root: Path, entity: str, load_date: str):
@@ -255,18 +263,18 @@ def write_clickhouse(df, table: str, args) -> int:
     return row_count
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     ensure_schema(args)
 
     if is_load_date_committed(args):
         if not args.force_reload:
-            print(
-                f"[SKIP] load_date={args.load_date} уже загружен в "
-                "ClickHouse (см. _load_commits) — повторная загрузка "
-                "не требуется. Передай --force-reload, чтобы принудительно "
-                "перезаписать этот день."
+            logger.info(
+                "[SKIP] load_date=%s is already loaded into ClickHouse "
+                "(see _load_commits); nothing to do. Pass --force-reload "
+                "to overwrite this day.",
+                args.load_date,
             )
             return
 
@@ -385,19 +393,18 @@ def main():
             dq_metrics, "dq_metrics", args
         )
 
-        print("ClickHouse load completed successfully.")
+        logger.info("ClickHouse load completed successfully.")
 
     finally:
         spark.stop()
 
-    # Пишется ПОСЛЕ spark.stop(): маркер — это лёгкий HTTP-запрос сам по
-    # себе, не часть Spark-транзакции, и ему незачем ждать остановки
-    # сессии. Важен порядок относительно записи данных выше — если
-    # какая-либо из entity_counts[...] выше бросит исключение, до этой
-    # строки выполнение не дойдёт, и is_load_date_committed() на
-    # следующем запуске честно вернёт False.
+    # После spark.stop(): маркер — обычный HTTP-запрос, не часть
+    # Spark-транзакции. Важен только порядок относительно записи данных
+    # выше: исключение в любом write_clickhouse() до этой строки не
+    # доходит, и день остаётся неотмеченным.
     record_commit(args, entity_counts)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     main()

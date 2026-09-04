@@ -24,6 +24,7 @@ customer_id относительно уже обработанной истор�
 не стартует, пока day N не завершился (успешно или с ошибкой).
 """
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,7 +40,8 @@ DATA_DIR = str(REPO_ROOT / "data")
 # из отдельного airflow-venv (только requirements-airflow.txt, без
 # pandas и прочего из requirements-spark.txt), поэтому голое "python"
 # там резолвится не в то окружение и падает с ImportError.
-PYTHON_BIN = str(REPO_ROOT / "venv" / "bin" / "python")
+_VENV_BIN = "Scripts" if os.name == "nt" else "bin"
+PYTHON_BIN = str(REPO_ROOT / "venv" / _VENV_BIN / "python")
 
 GROWTH_CONFIG = json.loads(
     (REPO_ROOT / "growth_config.json").read_text(encoding="utf-8")
@@ -56,6 +58,25 @@ START_DATE = datetime.fromisoformat(GROWTH_CONFIG["start_date"]).replace(
     tzinfo=timezone.utc
 )
 RAMP_DAYS = GROWTH_CONFIG["ramp_days"]
+
+# Ключи growth_config.json, которые уходят в generate_data.py один в один:
+# имя ключа = имя CLI-флага (подчёркивания -> дефисы). Список явный, а не
+# «все ключи конфига», потому что параметры кривой роста (base_orders и
+# т.п.) генератору не передаются — они сворачиваются в customers_count/
+# orders_count функцией _volume_for_day().
+BUSINESS_RULE_KEYS = [
+    "error_rate",
+    "payment_deadline_hours",
+    "shipping_deadline_hours",
+    "delivery_deadline_days",
+    "pickup_deadline_days",
+    "return_window_days",
+    "refund_processing_hours",
+    "cancel_before_payment_rate",
+    "cancel_after_payment_rate",
+    "return_rate",
+    "never_order_rate",
+]
 
 
 def _volume_for_day(day_index: int) -> tuple[int, int]:
@@ -93,8 +114,13 @@ def _volume_for_day(day_index: int) -> tuple[int, int]:
     return customers_count, orders_count
 
 
-def _run(args: list[str]) -> None:
-    subprocess.run(args, cwd=REPO_ROOT, check=True)
+def _run(args: list[str], env: dict[str, str] | None = None) -> None:
+    subprocess.run(
+        args,
+        cwd=REPO_ROOT,
+        check=True,
+        env={**os.environ, **env} if env else None,
+    )
 
 
 @dag(
@@ -127,6 +153,12 @@ def daily_marketplace_pipeline():
             orders_count * GROWTH_CONFIG["payments_margin_pct"] // 100
         )
 
+        business_rules = [
+            arg
+            for key in BUSINESS_RULE_KEYS
+            for arg in (f"--{key.replace('_', '-')}", str(GROWTH_CONFIG[key]))
+        ]
+
         _run([
             PYTHON_BIN, "generate_data.py",
             "--load-date", ds,
@@ -134,18 +166,8 @@ def daily_marketplace_pipeline():
             "--customers-count", str(customers_count),
             "--orders-count", str(orders_count),
             "--payments-count", str(payments_count),
-            "--error-rate", str(GROWTH_CONFIG["error_rate"]),
             "--launch-date", GROWTH_CONFIG["start_date"],
-            "--payment-deadline-hours", str(GROWTH_CONFIG["payment_deadline_hours"]),
-            "--shipping-deadline-hours", str(GROWTH_CONFIG["shipping_deadline_hours"]),
-            "--delivery-deadline-days", str(GROWTH_CONFIG["delivery_deadline_days"]),
-            "--pickup-deadline-days", str(GROWTH_CONFIG["pickup_deadline_days"]),
-            "--return-window-days", str(GROWTH_CONFIG["return_window_days"]),
-            "--refund-processing-hours", str(GROWTH_CONFIG["refund_processing_hours"]),
-            "--cancel-before-payment-rate", str(GROWTH_CONFIG["cancel_before_payment_rate"]),
-            "--cancel-after-payment-rate", str(GROWTH_CONFIG["cancel_after_payment_rate"]),
-            "--return-rate", str(GROWTH_CONFIG["return_rate"]),
-            "--never-order-rate", str(GROWTH_CONFIG["never_order_rate"]),
+            *business_rules,
         ])
 
     @task
@@ -169,20 +191,29 @@ def daily_marketplace_pipeline():
         # Пароль читается из Airflow Connection, а не из growth_config.json/
         # clickhouse_config.json — не оседает ни в git, ни в рендере
         # шаблонов задачи (в отличие от BashOperator с командой-строкой).
+        # Дальше он уходит переменной окружения, а не флагом: аргументы
+        # командной строки видны в ps любому пользователю воркера.
         password = BaseHook.get_connection("clickhouse_default").password
 
-        _run([
-            PYTHON_BIN, "load_to_clickhouse.py",
-            "--load-date", ds,
-            "--data-dir", DATA_DIR,
-            "--clickhouse-host", CLICKHOUSE_CONFIG["host"],
-            "--clickhouse-port", str(CLICKHOUSE_CONFIG["port"]),
-            "--clickhouse-database", CLICKHOUSE_CONFIG["database"],
-            "--clickhouse-user", CLICKHOUSE_CONFIG["user"],
-            "--clickhouse-password", password,
-        ])
+        _run(
+            [
+                PYTHON_BIN, "load_to_clickhouse.py",
+                "--load-date", ds,
+                "--data-dir", DATA_DIR,
+                "--clickhouse-host", CLICKHOUSE_CONFIG["host"],
+                "--clickhouse-port", str(CLICKHOUSE_CONFIG["port"]),
+                "--clickhouse-database", CLICKHOUSE_CONFIG["database"],
+                "--clickhouse-user", CLICKHOUSE_CONFIG["user"],
+            ],
+            env={"CLICKHOUSE_PASSWORD": password},
+        )
 
-    generate(ds="{{ ds }}") >> ingest(ds="{{ ds }}") >> transform(ds="{{ ds }}") >> load(ds="{{ ds }}")
+    (
+        generate(ds="{{ ds }}")
+        >> ingest(ds="{{ ds }}")
+        >> transform(ds="{{ ds }}")
+        >> load(ds="{{ ds }}")
+    )
 
 
 daily_marketplace_pipeline()

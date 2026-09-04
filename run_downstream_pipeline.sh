@@ -9,8 +9,13 @@
 # отработал (см. backfill_history.sh) — эта стадия его не запускает.
 #
 # Использование:
-#   ./run_downstream_pipeline.sh <clickhouse_password>          # с начала
-#   ./run_downstream_pipeline.sh <clickhouse_password> 5        # с дня 5
+#   ./run_downstream_pipeline.sh          # с начала
+#   ./run_downstream_pipeline.sh 5        # с дня 5
+#
+# Пароль ClickHouse берётся из CLICKHOUSE_PASSWORD (той же переменной,
+# что читает docker-compose.yml), а если её нет — спрашивается скрытым
+# вводом. В аргументах командной строки он не передаётся: оттуда он
+# попадает и в историю оболочки, и в список процессов.
 #
 # ВАЖНО про возобновление: в отличие от backfill_history.sh, здесь три
 # стадии на день, и упасть может любая из трёх. RESUME_FROM_DAY
@@ -42,7 +47,7 @@ DAYS=$(_growth_cfg days)
 # host/port/database/user — единый источник правды в
 # clickhouse_config.json, общий с load_to_clickhouse.py (дефолты
 # argparse) и Airflow DAG'ом (daily_marketplace_pipeline). Пароль в
-# этом файле намеренно не хранится — только как CLI-аргумент.
+# этом файле намеренно не хранится — см. CLICKHOUSE_PASSWORD ниже.
 CLICKHOUSE_CONFIG="$(dirname "$0")/clickhouse_config.json"
 _ch_cfg() { python -c "import json; print(json.load(open('${CLICKHOUSE_CONFIG}'))['$1'])"; }
 
@@ -50,8 +55,25 @@ CLICKHOUSE_HOST=$(_ch_cfg host)
 CLICKHOUSE_PORT=$(_ch_cfg port)
 CLICKHOUSE_DATABASE=$(_ch_cfg database)
 CLICKHOUSE_USER=$(_ch_cfg user)
-CLICKHOUSE_PASSWORD="${1:?Usage: ./run_downstream_pipeline.sh <clickhouse_password> [resume_from_day]}"
-RESUME_FROM_DAY="${2:-1}"  # 1-indexed, как в выводе "(день N/DAYS)"
+RESUME_FROM_DAY="${1:-1}"  # 1-indexed, как в выводе "(день N/DAYS)"
+
+# -t 0 — проверка, что stdin действительно терминал: под nohup/в CI
+# спрашивать некого, и скрипт должен сказать об этом, а не повиснуть на
+# приглашении ввода.
+if [ -z "${CLICKHOUSE_PASSWORD:-}" ]; then
+  if [ -t 0 ]; then
+    read -r -s -p "Пароль ClickHouse (${CLICKHOUSE_USER}): " CLICKHOUSE_PASSWORD
+    echo
+  else
+    echo "Задай CLICKHOUSE_PASSWORD: ввод не терминал, спросить пароль негде." >&2
+    exit 1
+  fi
+fi
+
+if [ -z "${CLICKHOUSE_PASSWORD}" ]; then
+  echo "Пустой пароль ClickHouse." >&2
+  exit 1
+fi
 
 for i in $(seq 0 $((DAYS - 1))); do
   day_number=$((i + 1))
@@ -71,12 +93,13 @@ for i in $(seq 0 $((DAYS - 1))); do
     --load-date "${load_date}" \
     --data-dir "${DATA_DIR}"
 
-  python load_to_clickhouse.py \
+  # Пароль уходит переменной окружения, а не флагом: аргументы
+  # командной строки видны в ps любому пользователю машины.
+  CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD}" python load_to_clickhouse.py \
     --load-date "${load_date}" \
     --data-dir "${DATA_DIR}" \
     --clickhouse-host "${CLICKHOUSE_HOST}" \
     --clickhouse-port "${CLICKHOUSE_PORT}" \
     --clickhouse-database "${CLICKHOUSE_DATABASE}" \
-    --clickhouse-user "${CLICKHOUSE_USER}" \
-    --clickhouse-password "${CLICKHOUSE_PASSWORD}"
+    --clickhouse-user "${CLICKHOUSE_USER}"
 done
