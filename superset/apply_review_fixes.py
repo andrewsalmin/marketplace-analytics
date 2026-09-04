@@ -58,9 +58,21 @@ ORDERS = "marketplace_analytics.orders FINAL"
 # P0-03. Заказ считается «зрелым», если с его создания прошло больше недели:
 # только тогда он успел отмениться, вернуться или доехать. Отсчёт от
 # максимума в данных, а не от now(), чтобы пайплайн можно было не трогать.
+#
+# Выражение годится только внутри SQL витрины. В фильтре чарта его быть
+# не может: Superset отвергает подзапросы в custom SQL
+# (ALLOW_ADHOC_SUBQUERY=False) и рисует «Custom SQL fields cannot contain
+# sub-queries» вместо графика. Поэтому витрины отдают готовую колонку
+# is_mature, а чарты фильтруют по ней (MATURE_FILTER).
 MATURE_ORDERS = (
     f"created_at < (SELECT max(created_at) - INTERVAL 7 DAY FROM {ORDERS})"
 )
+
+MATURE_FILTER = ("is_mature = 1", "is_mature")
+
+# Фильтр с подзапросом, который стоял в чартах до этого: его надо
+# вычистить, иначе он останется рядом с новым и продолжит ломать чарт.
+OBSOLETE_FILTERS = [MATURE_ORDERS]
 
 # P0-04/P0-05. Клиент «зрелый» через 30 дней после регистрации.
 MATURE_REGISTRATION = (
@@ -237,6 +249,23 @@ def sql_filter(expression: str, subject: str) -> dict[str, Any]:
     }
 
 
+def drop_filters(filters: list[Any], expressions: list[str]) -> list[Any]:
+    """Убирает фильтры с перечисленными SQL-выражениями.
+
+    Нужно, чтобы правка была самоисправляющейся: без этого фильтр,
+    записанный прошлой версией скрипта, остался бы в чарте рядом с новым.
+    """
+    unwanted = {" ".join(e.split()) for e in expressions}
+    return [
+        f
+        for f in filters
+        if not (
+            isinstance(f, dict)
+            and " ".join(str(f.get("sqlExpression") or "").split()) in unwanted
+        )
+    ]
+
+
 def ensure_filter(filters: list[Any], expression: str, subject: str) -> list[Any]:
     """Добавляет SQL-фильтр, если такого выражения ещё нет (идемпотентность)."""
     normalised = " ".join(expression.split())
@@ -304,11 +333,12 @@ FROM marketplace_analytics.payments FINAL
     # ссылаются на status_ru — колонка должна появиться раньше них.
     "orders": {
         "phase": "p0",
-        "note": "P2-06 словарь статусов в витрине заказов",
+        "note": "P2-06 словарь статусов + P0-03 признак зрелости заказа",
         "sql": f"""
 SELECT
     *,
-    {ORDER_STATUS_RU_CASE} AS status_ru
+    {ORDER_STATUS_RU_CASE} AS status_ru,
+    {MATURE_ORDERS} AS is_mature
 FROM marketplace_analytics.orders FINAL
 """.strip(),
     },
@@ -351,7 +381,8 @@ SELECT
     o.refunded_at         AS refunded_at,
     c.city                AS city,
     c.acquisition_channel AS acquisition_channel,
-    {CHANNEL_RU_CASE.format(col="c.acquisition_channel")} AS acquisition_channel_ru
+    {CHANNEL_RU_CASE.format(col="c.acquisition_channel")} AS acquisition_channel_ru,
+    o.{MATURE_ORDERS} AS is_mature
 FROM marketplace_analytics.orders AS o FINAL
 LEFT JOIN marketplace_analytics.customers AS c FINAL
        ON c.customer_id = o.customer_id
@@ -533,7 +564,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 **DATE_AXIS,
                 **rolling_mean(),
             },
-            "filters": [(MATURE_ORDERS, "created_at")],
+            "filters": [MATURE_FILTER],
         },
         "Изменение среднего чека (AOV)": {
             "phase": "p0",
@@ -545,7 +576,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 **DATE_AXIS,
                 **rolling_mean(),
             },
-            "filters": [(MATURE_ORDERS, "created_at")],
+            "filters": [MATURE_FILTER],
         },
         "Изменение долей отмен и возвратов": {
             "phase": "p0",
@@ -556,14 +587,14 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "отрезана: свежий заказ ещё не успел отмениться или вернуться."
             ),
             "set": {"y_axis_format": ".1%", **DATE_AXIS, **rolling_mean()},
-            "filters": [(MATURE_ORDERS, "created_at")],
+            "filters": [MATURE_FILTER],
         },
         "Изменение структуры статусов заказов": {
             "phase": "p0",
             "note": "P0-03 зрелый хвост",
             "slice_name": "Динамика структуры статусов заказов",
             "set": {"groupby": ["status_ru"], **DATE_AXIS},
-            "filters": [(MATURE_ORDERS, "created_at")],
+            "filters": [MATURE_FILTER],
         },
         "Время до первого заказа (дней с регистрации)": {
             "phase": "p0",
@@ -632,7 +663,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "metrics": [metric("Средний чек, ₽", AOV_PAID)],
                 **sort_by_first_metric("Средний чек, ₽"),
             },
-            "filters": [(MATURE_ORDERS, "created_at")],
+            "filters": [MATURE_FILTER],
         },
         "GMV по городам (топ-10)": {
             "phase": "p0",
@@ -641,7 +672,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "metrics": [metric("GMV, ₽", GMV_PAID)],
                 **sort_by_first_metric("GMV, ₽"),
             },
-            "filters": [(MATURE_ORDERS, "created_at")],
+            "filters": [MATURE_FILTER],
         },
         "Разбивка DQ-ошибок по типам": {
             "phase": "p0",
@@ -659,7 +690,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "x_axis": "acquisition_channel_ru",
                 **sort_by_first_metric("GMV, ₽"),
             },
-            "filters": [(MATURE_ORDERS, "created_at")],
+            "filters": [MATURE_FILTER],
         },
         "Средний чек по каналам привлечения": {
             "phase": "p0",
@@ -669,7 +700,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "x_axis": "acquisition_channel_ru",
                 **sort_by_first_metric("Средний чек, ₽"),
             },
-            "filters": [(MATURE_ORDERS, "created_at")],
+            "filters": [MATURE_FILTER],
         },
         # ---------------- P1 ----------------
         "Воронка заказа": {
@@ -878,7 +909,7 @@ KPI_CHARTS: list[dict[str, Any]] = [
         "metric": metric("GMV, ₽", GMV_PAID),
         "format": "SMART_NUMBER",
         "subheader": "Оплаченные заказы за период",
-        "filters": [(MATURE_ORDERS, "created_at")],
+        "filters": [MATURE_FILTER],
     },
     {
         "name": "KPI · Заказы",
@@ -886,7 +917,7 @@ KPI_CHARTS: list[dict[str, Any]] = [
         "metric": metric("Заказов", "count()"),
         "format": "SMART_NUMBER",
         "subheader": "Создано заказов",
-        "filters": [(MATURE_ORDERS, "created_at")],
+        "filters": [MATURE_FILTER],
     },
     {
         "name": "KPI · Средний чек",
@@ -894,7 +925,7 @@ KPI_CHARTS: list[dict[str, Any]] = [
         "metric": metric("Средний чек, ₽", AOV_PAID),
         "format": ",.0f",
         "subheader": "На оплаченный заказ",
-        "filters": [(MATURE_ORDERS, "created_at")],
+        "filters": [MATURE_FILTER],
     },
     {
         "name": "KPI · Доля отмен",
@@ -902,7 +933,7 @@ KPI_CHARTS: list[dict[str, Any]] = [
         "metric": metric("Доля отмен", "countIf(cancelled_at IS NOT NULL) / count()"),
         "format": ".1%",
         "subheader": "От числа созданных заказов",
-        "filters": [(MATURE_ORDERS, "created_at")],
+        "filters": [MATURE_FILTER],
     },
     {
         "name": "KPI · Невалидных строк",
@@ -1051,6 +1082,9 @@ class Runner:
 
         if "replace_filters" in patch:
             form_data["adhoc_filters"] = list(patch["replace_filters"])
+        form_data["adhoc_filters"] = drop_filters(
+            form_data.get("adhoc_filters") or [], OBSOLETE_FILTERS
+        )
         for expression, subject in patch.get("filters", []):
             form_data["adhoc_filters"] = ensure_filter(
                 form_data.get("adhoc_filters") or [], expression, subject
