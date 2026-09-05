@@ -76,6 +76,15 @@ SELECT
         WHEN 'refunded'         THEN 'Возмещён'
         ELSE status
     END AS status_ru,
+    CASE cancellation_reason
+        WHEN 'cancelled_by_customer_before_payment'
+            THEN 'Отменён покупателем до оплаты'
+        WHEN 'cancelled_by_customer_after_payment'
+            THEN 'Отменён покупателем после оплаты'
+        WHEN 'not_paid_in_time'     THEN 'Не оплачен вовремя'
+        WHEN 'not_picked_up_in_time' THEN 'Не забрали вовремя'
+        ELSE cancellation_reason
+    END AS cancellation_reason_ru,
     created_at < (
         SELECT max(created_at) - INTERVAL {{MATURITY_DAYS}} DAY
         FROM marketplace_analytics.orders FINAL
@@ -97,7 +106,15 @@ SELECT
         WHEN 'wallet'       THEN 'Электронный кошелёк'
         WHEN 'installments' THEN 'Рассрочка'
         ELSE payment_method
-    END AS payment_method_ru
+    END AS payment_method_ru,
+    -- Исход авторизации и последующий возврат — разные события, и
+    -- смешивать их нельзя. Возврат переиздаёт платёж под тем же
+    -- payment_id со статусом refunded, поэтому после FINAL успешная
+    -- попытка исчезает: success rate за июнь меняется в сентябре, хотя
+    -- в июне банк её провёл. attempt_succeeded помнит исход попытки,
+    -- is_refunded — что было с деньгами дальше.
+    status IN ('success', 'refunded') AS attempt_succeeded,
+    status = 'refunded'               AS is_refunded
 FROM marketplace_analytics.payments FINAL;
 
 -- ---------------------------------------------------------------------
@@ -129,18 +146,33 @@ UNION ALL
 SELECT 'Доставлено', 5, countIf(delivered_at IS NOT NULL)
 FROM marketplace_marts.orders WHERE is_mature;
 
--- Заказ с измерениями покупателя: город и канал привлечения. Признаки
--- оплаты (paid_at) и отмены отдаются как есть — GMV «по оплаченным»
--- считается в метриках чартов поверх них.
+-- Заказ с измерениями покупателя — основной факт для чартов.
+--
+-- Именно эта витрина, а не marketplace_marts.orders, стоит под всеми
+-- чартами заказов: фильтры дашборда по городу и каналу применяются к
+-- измерениям, а измерения есть только здесь. Пока KPI считались по
+-- orders, выбор города пересчитывал часть показателей и не трогал
+-- остальные — на экране получалась смесь двух разных выборок.
+--
+-- Поэтому здесь отдаются все вехи заказа, а не только оплата и отмена:
+-- иначе чарт, которому нужен returned_at, вынужден идти мимо витрины и
+-- терять измерения.
 CREATE OR REPLACE VIEW marketplace_marts.orders_with_customer_dim AS
 SELECT
     o.order_id               AS order_id,
+    o.customer_id            AS customer_id,
     o.created_at             AS created_at,
     o.amount_kopecks         AS amount_kopecks,
     o.status                 AS status,
     o.status_ru              AS status_ru,
     o.paid_at                AS paid_at,
+    o.shipped_at             AS shipped_at,
+    o.ready_for_pickup_at    AS ready_for_pickup_at,
+    o.delivered_at           AS delivered_at,
     o.cancelled_at           AS cancelled_at,
+    o.cancellation_reason    AS cancellation_reason,
+    o.cancellation_reason_ru AS cancellation_reason_ru,
+    o.returned_at            AS returned_at,
     o.refunded_at            AS refunded_at,
     o.is_mature              AS is_mature,
     c.city                   AS city,
@@ -167,6 +199,23 @@ SELECT
     c.registration_date AS registration_date,
     c.city              AS city,
     c.acquisition_channel_ru AS acquisition_channel_ru,
+    countIf(o.order_id != '') AS orders_count,
+    -- Явный признак, а не «дата первого заказа не пуста»: наличие
+    -- заказа выводить из даты нельзя, потому что LEFT JOIN подставляет
+    -- не NULL, а значение по умолчанию (см. nullIf ниже). Именно на
+    -- этом конверсия показывала ровно 100% при любых данных.
+    orders_count > 0 AS has_order,
+    -- Вторая метрика, а не та же самая: «когда-нибудь купил» и «купил
+    -- в окно наблюдения» отвечают на разные вопросы и расходятся тем
+    -- сильнее, чем длиннее история. Окно то же, по которому когорта
+    -- признаётся зрелой ниже, — иначе метрика считалась бы по клиентам,
+    -- у которых это окно ещё не закрылось.
+    countIf(
+        o.order_id != ''
+        AND o.created_at >= c.registration_date
+        AND o.created_at
+            < c.registration_date + INTERVAL {{CUSTOMER_MATURITY_DAYS}} DAY
+    ) > 0 AS converted_within_window,
     nullIf(min(o.created_at), toDateTime(0)) AS first_order_at,
     dateDiff('day', c.registration_date, nullIf(min(o.created_at), toDateTime(0)))
         AS days_to_first_order,
@@ -195,6 +244,25 @@ WHERE is_mature
   AND days_to_first_order >= 0
 GROUP BY days_to_first_order
 ORDER BY days_to_first_order;
+
+-- Распределение числа попыток оплаты на заказ.
+--
+-- Считаются все попытки, включая возмещённые: прежняя версия отбирала
+-- только success и failed, и заказ, по которому позже прошёл возврат,
+-- исчезал из распределения целиком вместе со своими попытками.
+--
+-- Колонка называется attempts, а не retries: одна попытка — это ноль
+-- ретраев, и подпись «число ретраев = 1» для единственной попытки
+-- вводила в заблуждение.
+CREATE OR REPLACE VIEW marketplace_marts.payment_retries_distribution AS
+SELECT attempts, count() AS orders_count
+FROM (
+    SELECT order_id, count() AS attempts
+    FROM marketplace_marts.payments
+    GROUP BY order_id
+)
+GROUP BY attempts
+ORDER BY attempts;
 
 -- Сырые длительности обработки рефанда, а не дневные средние: перцентиль
 -- по средним — это не перцентиль по заказам.

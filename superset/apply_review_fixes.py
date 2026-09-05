@@ -97,7 +97,13 @@ OBSOLETE_FILTERS = [
 MATURE_FILTER = ("is_mature = 1", "is_mature")
 
 PAID = "paid_at IS NOT NULL"
-NOT_CANCELLED = "cancelled_at IS NULL AND refunded_at IS NULL"
+# «Чистый» — заказ, который дошёл до покупателя и остался у него:
+# ни отмены, ни возврата товара, ни возврата денег. Возврат товара
+# (returned_at) раньше в условие не входил, и 1 749 возвращённых
+# заказов на 3,53 млн ₽ считались чистой выручкой.
+NOT_CANCELLED = (
+    "cancelled_at IS NULL AND returned_at IS NULL AND refunded_at IS NULL"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +337,10 @@ DATASETS: dict[str, dict[str, str]] = {
         "phase": "p2",
         "note": "P2-04 свежесть загрузки из _load_commits",
     },
+    "payment_retries_distribution": {
+        "phase": "p0",
+        "note": "1.5 попытки оплаты вместе с возмещёнными",
+    },
 }
 
 
@@ -354,6 +364,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         # ---------------- P0 ----------------
         "Изменение GMV": {
             "phase": "p0",
+            "dataset": "orders_with_customer_dim",
             "note": "P0-02 GMV только по оплаченным + P0-03 зрелый хвост",
             "slice_name": "Динамика GMV",
             "description": (
@@ -375,6 +386,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Изменение среднего чека (AOV)": {
             "phase": "p0",
+            "dataset": "orders_with_customer_dim",
             "note": "P0-02 средний чек по оплаченным заказам",
             "slice_name": "Динамика среднего чека (AOV)",
             "description": "Сумма оплаченных заказов, делённая на их число.",
@@ -387,6 +399,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Изменение долей отмен и возвратов": {
             "phase": "p0",
+            "dataset": "orders_with_customer_dim",
             "note": "P0-03 зрелый хвост + P1-05 проценты",
             "slice_name": "Динамика долей отмен и возвратов",
             "description": (
@@ -399,6 +412,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Изменение структуры статусов заказов": {
             "phase": "p0",
+            "dataset": "orders_with_customer_dim",
             "note": "P0-03 зрелый хвост",
             "slice_name": "Динамика структуры статусов заказов",
             "set": {"groupby": ["status_ru"], **DATE_AXIS},
@@ -429,14 +443,19 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Конверсия: регистрация → первый заказ": {
             "phase": "p0",
-            "note": "P0-05 только зрелые когорты",
+            "note": "1.1 явный признак заказа вместо даты",
             "description": (
-                "Доля клиентов, сделавших хотя бы один заказ, по когортам "
-                "старше 30 дней. Часть регистраций не конвертируется никогда "
-                "(--never-order-rate в generate_data.py), доля зависит от "
-                "канала привлечения."
+                "Доля покупателей, сделавших хотя бы один заказ. Считается "
+                "по когортам с полным горизонтом наблюдения — у регистраций "
+                "последних недель заказ ещё впереди."
             ),
-            "set": {"y_axis_format": ".1%"},
+            "set": {
+                "metric": metric(
+                    "Конверсия в первый заказ", "sum(has_order) / count()"
+                ),
+                "y_axis_format": ".1%",
+                "subheader": "Хотя бы один заказ за всю историю",
+            },
             "filters": [("is_mature = 1", "is_mature")],
         },
         "Время обработки рефанда": {
@@ -544,6 +563,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Причины отмены заказов": {
             "phase": "p1",
+            "dataset": "orders_with_customer_dim",
             "note": "P1-03 подписи внутри пирога + P2-06 словарь из витрины",
             "set": {
                 "groupby": ["cancellation_reason_ru"],
@@ -569,6 +589,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Изменение причин отмены": {
             "phase": "p1",
+            "dataset": "orders_with_customer_dim",
             "note": "P1-04 легенда сбоку + P1-01 формат оси",
             "slice_name": "Динамика причин отмены",
             "set": {
@@ -579,13 +600,20 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Изменение success rate оплаты": {
             "phase": "p1",
-            "note": "P1-05 проценты, P1-06 границы оси, P1-07 сглаживание",
+            "note": "1.5 исход попытки не переписывается возвратом",
             "slice_name": "Динамика success rate оплаты",
             "description": (
-                "Доля success среди завершённых попыток (success + failed). "
-                "Скользящее среднее за 7 дней."
+                "Доля успешно проведённых попыток оплаты. Возврат денег "
+                "не отменяет того, что платёж прошёл: иначе показатель за "
+                "июнь менялся бы задним числом в сентябре."
             ),
             "set": {
+                "metrics": [
+                    metric(
+                        "Доля успешных оплат",
+                        "countIf(attempt_succeeded) / count()",
+                    )
+                ],
                 "y_axis_format": ".1%",
                 "truncateYAxis": True,
                 "y_axis_bounds": [0.5, 1],
@@ -633,6 +661,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Количество заказов по часам и дням недели": {
             "phase": "p1",
+            "dataset": "orders_with_customer_dim",
             "note": "P1-09 понедельник сверху",
             "set": {"sort_y_axis": "alpha_desc", "sort_x_axis": "alpha_asc"},
         },
@@ -656,6 +685,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Изменение числа заказов": {
             "phase": "p1",
+            "dataset": "orders_with_customer_dim",
             "note": "P1-01 формат оси + P1-07 сглаживание + P1-11 заголовок",
             "slice_name": "Динамика числа заказов",
             "set": {**DATE_AXIS, **rolling_mean()},
@@ -674,6 +704,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Изменение суммы рефандов": {
             "phase": "p1",
+            "dataset": "orders_with_customer_dim",
             "note": "P1-01 формат оси + P1-11 заголовок",
             "slice_name": "Динамика суммы рефандов",
             "set": DATE_AXIS,
@@ -694,13 +725,23 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             },
         },
         "Распределение ретраев оплаты": {
-            "phase": "p2",
-            "note": "P2-05 описание логарифмической шкалы",
+            "phase": "p0",
+            "note": "1.5 попытки вместо ретраев, с учётом возмещённых",
+            "slice_name": "Распределение попыток оплаты",
+            "dataset": "payment_retries_distribution",
             "description": (
-                "Сколько заказов потребовали N попыток оплаты. Ось Y "
-                "логарифмическая — иначе хвост не виден."
+                "Сколько заказов потребовали N попыток оплаты: одна "
+                "попытка — это оплата с первого раза. Ось Y "
+                "логарифмическая, иначе хвост не виден."
             ),
-            "set": {"x_axis_sort": "retries", "x_axis_sort_asc": True},
+            "set": {
+                "x_axis": "attempts",
+                "metrics": [metric("Число заказов", "SUM(orders_count)")],
+                "x_axis_title": "Попыток оплаты на заказ",
+                "y_axis_title": "Число заказов",
+                "x_axis_sort": "attempts",
+                "x_axis_sort_asc": True,
+            },
         },
         "Распределение числа заказов на клиента": {
             "phase": "p2",
@@ -714,7 +755,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
 KPI_CHARTS: list[dict[str, Any]] = [
     {
         "name": "KPI · GMV",
-        "dataset": "orders",
+        "dataset": "orders_with_customer_dim",
         "metric": metric("GMV, ₽", GMV_PAID),
         "format": "SMART_NUMBER",
         "subheader": "Оплаченные заказы за период",
@@ -722,7 +763,7 @@ KPI_CHARTS: list[dict[str, Any]] = [
     },
     {
         "name": "KPI · Заказы",
-        "dataset": "orders",
+        "dataset": "orders_with_customer_dim",
         "metric": metric("Заказов", "count()"),
         "format": "SMART_NUMBER",
         "subheader": "Создано заказов",
@@ -730,7 +771,7 @@ KPI_CHARTS: list[dict[str, Any]] = [
     },
     {
         "name": "KPI · Средний чек",
-        "dataset": "orders",
+        "dataset": "orders_with_customer_dim",
         "metric": metric("Средний чек, ₽", AOV_PAID),
         "format": ",.0f",
         "subheader": "На оплаченный заказ",
@@ -738,7 +779,7 @@ KPI_CHARTS: list[dict[str, Any]] = [
     },
     {
         "name": "KPI · Доля отмен",
-        "dataset": "orders",
+        "dataset": "orders_with_customer_dim",
         "metric": metric("Доля отмен", "countIf(cancelled_at IS NOT NULL) / count()"),
         "format": ".1%",
         "subheader": "От числа созданных заказов",
