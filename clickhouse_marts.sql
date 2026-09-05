@@ -113,8 +113,12 @@ SELECT
     -- попытка исчезает: success rate за июнь меняется в сентябре, хотя
     -- в июне банк её провёл. attempt_succeeded помнит исход попытки,
     -- is_refunded — что было с деньгами дальше.
-    status IN ('success', 'refunded') AS attempt_succeeded,
-    status = 'refunded'               AS is_refunded
+    -- CAST снимает LowCardinality: status объявлен как
+    -- LowCardinality(String), сравнение с ним возвращает
+    -- LowCardinality(UInt8), а такую колонку ClickHouse во вьюхе
+    -- создавать отказывается (SUSPICIOUS_TYPE_FOR_LOW_CARDINALITY).
+    CAST(status IN ('success', 'refunded'), 'UInt8') AS attempt_succeeded,
+    CAST(status = 'refunded', 'UInt8')               AS is_refunded
 FROM marketplace_analytics.payments FINAL;
 
 -- ---------------------------------------------------------------------
