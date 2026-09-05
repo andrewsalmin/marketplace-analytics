@@ -14,3 +14,6 @@ venv/
 
 # Бэкапы Superset, которые apply_review_fixes.py снимает перед записью.
 /superset_backup_*.zip
+
+# Логи прогонов пайплайна — артефакт запуска.
+pipeline.log
