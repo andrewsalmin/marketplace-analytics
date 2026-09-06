@@ -841,7 +841,12 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "ячейка показывает среднее по паре удачных дней."
             ),
             "set": {
-                "metric": metric("Заказов в час (в среднем)", "avg(orders_per_day)"),
+                # Не avg(orders_per_day): среднее уже посчитанных средних
+                # не складывается по городам. Делим отфильтрованную сумму
+                # на число дней — оно одинаково внутри дня недели.
+                "metric": metric(
+                    "Заказов в час (в среднем)", "sum(orders) / max(days)"
+                ),
                 "groupby": "dow_label",
                 "x_axis": "hour_of_day",
                 "y_axis_format": ",.2f",

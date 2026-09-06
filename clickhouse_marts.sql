@@ -217,6 +217,14 @@ LEFT JOIN marketplace_marts.customers AS c
 --
 -- Календарь строится от границ данных, а не от now(): остановленный
 -- пайплайн иначе раздувал бы знаменатель пустыми сутками.
+--
+-- Гранулярность — до города и канала, чтобы фильтры дашборда работали и
+-- здесь. Предагрегат без измерений молча игнорировал бы выбор города, и
+-- рядом с пересчитанными карточками висела бы карта по всей стране.
+--
+-- Готового orders_per_day в витрине нет намеренно: среднее нельзя
+-- складывать. Числитель и знаменатель отдаются отдельно, а чарт делит
+-- уже отфильтрованную сумму на число дней — sum(orders) / max(days).
 CREATE OR REPLACE VIEW marketplace_marts.orders_by_hour_dow AS
 WITH
     (SELECT toDate(min(created_at)) FROM marketplace_marts.orders) AS first_day,
@@ -255,16 +263,19 @@ WITH
             ELSE '7 · Вс'
         END AS dow_label,
             toHour(created_at) AS hour_of_day,
+            city,
+            acquisition_channel_ru,
             count() AS orders
-        FROM marketplace_marts.orders
-        GROUP BY dow_label, hour_of_day
+        FROM marketplace_marts.orders_with_customer_dim
+        GROUP BY dow_label, hour_of_day, city, acquisition_channel_ru
     )
 SELECT
     d.dow_label AS dow_label,
     h.hour_of_day AS hour_of_day,
-    ifNull(o.orders, 0) AS orders,
-    d.days AS days,
-    ifNull(o.orders, 0) / d.days AS orders_per_day
+    o.city AS city,
+    o.acquisition_channel_ru AS acquisition_channel_ru,
+    o.orders AS orders,
+    d.days AS days
 FROM days_per_dow AS d
 CROSS JOIN (SELECT arrayJoin(range(24)) AS hour_of_day) AS h
 LEFT JOIN orders_per_cell AS o
