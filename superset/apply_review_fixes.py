@@ -186,6 +186,59 @@ class Superset:
             fh.write(resp.content)
         return dest
 
+    # --- роли и права ---------------------------------------------------
+
+    def role_by_name(self, name: str) -> dict[str, Any] | None:
+        query = json.dumps(
+            {"filters": [{"col": "name", "opr": "eq", "value": name}]}
+        )
+        rows = self.get(f"/api/v1/security/roles/?q={query}")["result"]
+        return rows[0] if rows else None
+
+    def role_permission_ids(self, role_id: int) -> set[int]:
+        query = json.dumps({"page_size": 1000})
+        result = self.get(
+            f"/api/v1/security/roles/{role_id}/permissions/?q={query}"
+        )["result"]
+        return {row["id"] for row in result}
+
+    def datasource_permissions(self, schema: str) -> dict[str, int]:
+        """Разрешения datasource_access на витрины схемы: имя -> id.
+
+        Superset называет их по шаблону [база].[схема].[таблица](id:N),
+        поэтому отбор идёт по подстроке `.[схема].`, а не по точному
+        совпадению: имя базы в разных инсталляциях своё.
+        """
+        found: dict[str, int] = {}
+        page = 0
+        while True:
+            query = json.dumps({"page_size": 100, "page": page})
+            result = self.get(
+                f"/api/v1/security/permissions-resources/?q={query}"
+            )["result"]
+            if not result:
+                break
+            for row in result:
+                permission = (row.get("permission") or {}).get("name")
+                view_menu = (row.get("view_menu") or {}).get("name") or ""
+                if permission != "datasource_access":
+                    continue
+                marker = f".[{schema}]."
+                if marker not in view_menu:
+                    continue
+                table = view_menu.split(marker, 1)[1].split("]")[0].lstrip("[")
+                found[table] = row["id"]
+            page += 1
+            if page > 50:  # предохранитель от бесконечной страницы
+                break
+        return found
+
+    def set_role_permissions(self, role_id: int, ids: set[int]) -> None:
+        self.post(
+            f"/api/v1/security/roles/{role_id}/permissions",
+            {"permission_view_menu_ids": sorted(ids)},
+        )
+
     # --- справочники ---------------------------------------------------
 
     def datasets(self) -> dict[str, dict[str, Any]]:
@@ -904,6 +957,76 @@ class Runner:
         detail = self.client.get(f"/api/v1/dataset/{orders['id']}")["result"]
         return detail["database"]["id"]
 
+    def grant_public_access(self, role_name: str) -> None:
+        """Выдаёт роли право читать витрины после смены схемы датасета.
+
+        Права на датасет в Superset выданы поимённо:
+        `datasource access on [база].[схема].[таблица]`. Перевод датасета
+        в другую схему создаёт новый объект прав, а выданное указывает в
+        никуда — анонимный посетитель мгновенно теряет доступ ко всему
+        переехавшему, хотя сами датасеты на месте.
+
+        Эндпоинт роли не добавляет права, а ЗАМЕНЯЕТ весь список,
+        поэтому здесь только объединение с текущими: ошибка в отборе
+        оставила бы роль вообще без прав, включая доступ к дашборду.
+        """
+        role = self.client.role_by_name(role_name)
+        if role is None:
+            print(f"  ! роль «{role_name}» не найдена — права не тронуты")
+            return
+
+        current = self.client.role_permission_ids(role["id"])
+        available = self.client.datasource_permissions(MARTS_SCHEMA)
+
+        needed = {name: available[name] for name in DATASETS if name in available}
+        absent = [name for name in DATASETS if name not in available]
+        missing = {name: pid for name, pid in needed.items() if pid not in current}
+
+        if absent:
+            print(
+                f"  ! нет объектов прав на витрины: {', '.join(absent)} — "
+                "похоже, датасеты ещё не переведены на схему"
+            )
+        if not missing:
+            return
+
+        self.log(
+            f"Роль «{role_name}»: доступ к витринам "
+            f"({len(missing)} из {len(needed)}) — " + ", ".join(sorted(missing))
+        )
+        if not self.apply:
+            return
+
+        # Снимок текущих прав до записи: восстановить роль по списку id
+        # проще, чем вспоминать, что в ней было.
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup = f"superset_role_{role_name}_{stamp}.json"
+        with open(backup, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "role": role_name,
+                    "id": role["id"],
+                    "permission_ids": sorted(current),
+                },
+                fh,
+                ensure_ascii=False,
+                indent=2,
+            )
+        print(f"    снимок прав роли: {backup}")
+
+        self.client.set_role_permissions(role["id"], current | set(missing.values()))
+
+        after = self.client.role_permission_ids(role["id"])
+        lost = current - after
+        if lost:
+            raise SupersetError(
+                f"Роль «{role_name}» потеряла {len(lost)} прав при записи. "
+                f"Восстанови по снимку {backup}"
+            )
+        still_missing = [n for n, pid in missing.items() if pid not in after]
+        if still_missing:
+            raise SupersetError("Права не записались: " + ", ".join(still_missing))
+
     # --- чарты ---------------------------------------------------------
 
     def patch_charts(self, phases: set[str]) -> None:
@@ -1275,6 +1398,11 @@ def main() -> int:
         help="писать изменения (без флага печатается только план)",
     )
     parser.add_argument("--dashboard", type=int, default=1, help="id дашборда")
+    parser.add_argument(
+        "--public-role",
+        default="Public",
+        help="роль, которой выдать доступ к витринам (пусто — не трогать)",
+    )
     parser.add_argument("--url", default=os.environ.get("SUPERSET_URL"))
     parser.add_argument("--username", default=os.environ.get("SUPERSET_USERNAME"))
     parser.add_argument("--password", default=os.environ.get("SUPERSET_PASSWORD"))
@@ -1338,6 +1466,10 @@ def main() -> int:
 
     print("\nДашборд:")
     runner.patch_dashboard(phases, kpi_ids)
+
+    if args.public_role:
+        print("\nПрава:")
+        runner.grant_public_access(args.public_role)
 
     print(f"\nИтого изменений: {len(runner.planned)}")
     if not args.apply and runner.planned:
