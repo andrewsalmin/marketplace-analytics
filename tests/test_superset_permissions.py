@@ -31,9 +31,12 @@ _spec.loader.exec_module(arf)
 class FakeClient:
     """Заглушка Superset: помнит права роли и записанные вызовы."""
 
-    def __init__(self, permissions=None, role_permissions=None):
+    def __init__(self, permissions=None, role_permissions=None, named=None):
         self.permissions = dict(permissions or {})
         self.role_permissions = set(role_permissions or [])
+        # Именованные права вроде can_read на TimeRangeRestApi. По
+        # умолчанию есть — их отсутствие проверяется отдельным тестом.
+        self.named = {"TimeRangeRestApi": 900} if named is None else dict(named)
         self.written: list[set[int]] = []
 
     def role_by_name(self, name):
@@ -44,6 +47,9 @@ class FakeClient:
 
     def datasource_permissions(self):
         return dict(self.permissions)
+
+    def named_permissions(self, wanted):
+        return dict(self.named)
 
     def set_role_permissions(self, role_id, ids):
         self.written.append(set(ids))
@@ -153,7 +159,8 @@ class TestGrantPublicAccess:
     def test_nothing_is_written_when_access_is_already_granted(self):
         datasets = _all_datasets()
         perms = _all_permissions(datasets)
-        client = FakeClient(perms, role_permissions=set(perms.values()))
+        already = set(perms.values()) | {900}
+        client = FakeClient(perms, role_permissions=already)
         runner = make_runner(client, datasets)
 
         runner.grant_public_access("Public")
@@ -213,3 +220,27 @@ class TestGrantPublicAccess:
         make_runner(client, datasets).grant_public_access("Public")
 
         assert "orders" in capsys.readouterr().out
+
+
+class TestExtraPublicPermissions:
+    """Права, без которых аноним не может пользоваться дашбордом."""
+
+    def test_time_range_permission_is_granted_alongside_the_marts(self):
+        """Диалог периода без TimeRangeRestApi отвечает анониму 401."""
+        datasets = _all_datasets()
+        client = FakeClient(_all_permissions(datasets), role_permissions={1})
+
+        make_runner(client, datasets).grant_public_access("Public")
+
+        assert 900 in client.written[0], "право на разбор периода не выдано"
+
+    def test_absent_named_permission_is_reported(self, capsys):
+        datasets = _all_datasets()
+        perms = _all_permissions(datasets)
+        client = FakeClient(
+            perms, role_permissions=set(perms.values()), named={}
+        )
+
+        make_runner(client, datasets).grant_public_access("Public")
+
+        assert "TimeRangeRestApi" in capsys.readouterr().out

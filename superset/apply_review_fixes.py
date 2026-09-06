@@ -94,6 +94,14 @@ OBSOLETE_FILTERS = [
     f"{MATURITY_DAYS} DAY FROM marketplace_analytics.orders FINAL)"
 ]
 
+# Права, без которых анонимный посетитель не может пользоваться
+# дашбордом, хотя данные ему уже видны. Диалог периода превращает
+# «Last week» в конкретные даты запросом к TimeRangeRestApi; без доступа
+# туда он получает 401, кнопка APPLY гаснет, и выбрать период нельзя
+# вообще. Право узкое: эндпоинт только разбирает выражение дат и никаких
+# данных не отдаёт.
+PUBLIC_EXTRA_PERMISSIONS = [("can_read", "TimeRangeRestApi")]
+
 MATURE_FILTER = ("is_mature = 1", "is_mature")
 
 PAID = "paid_at IS NOT NULL"
@@ -226,6 +234,33 @@ class Superset:
         )["result"]
         return {row["id"] for row in result}
 
+    def _permission_rows(self) -> list[dict[str, Any]]:
+        """Все разрешения инстанса, постранично."""
+        rows: list[dict[str, Any]] = []
+        page = 0
+        while page < 50:  # предохранитель от бесконечной страницы
+            query = json.dumps({"page_size": 100, "page": page})
+            chunk = self.get(
+                f"/api/v1/security/permissions-resources/?q={query}"
+            )["result"]
+            if not chunk:
+                break
+            rows += chunk
+            page += 1
+        return rows
+
+    def named_permissions(self, wanted: list[tuple[str, str]]) -> dict[str, int]:
+        """Разрешения по паре (право, ресурс): «ресурс» -> id."""
+        targets = {pair: None for pair in wanted}
+        for row in self._permission_rows():
+            key = (
+                (row.get("permission") or {}).get("name"),
+                (row.get("view_menu") or {}).get("name"),
+            )
+            if key in targets:
+                targets[key] = row["id"]
+        return {view: pid for (_, view), pid in targets.items() if pid is not None}
+
     def datasource_permissions(self) -> dict[int, int]:
         """Разрешения datasource_access: id датасета -> id разрешения.
 
@@ -237,22 +272,13 @@ class Superset:
         датасета и смену имени базы.
         """
         found: dict[int, int] = {}
-        page = 0
-        while page < 50:  # предохранитель от бесконечной страницы
-            query = json.dumps({"page_size": 100, "page": page})
-            result = self.get(
-                f"/api/v1/security/permissions-resources/?q={query}"
-            )["result"]
-            if not result:
-                break
-            for row in result:
-                if (row.get("permission") or {}).get("name") != "datasource_access":
-                    continue
-                view_menu = (row.get("view_menu") or {}).get("name") or ""
-                match = re.search(r"\(id:(\d+)\)\s*$", view_menu)
-                if match:
-                    found[int(match.group(1))] = row["id"]
-            page += 1
+        for row in self._permission_rows():
+            if (row.get("permission") or {}).get("name") != "datasource_access":
+                continue
+            view_menu = (row.get("view_menu") or {}).get("name") or ""
+            match = re.search(r"\(id:(\d+)\)\s*$", view_menu)
+            if match:
+                found[int(match.group(1))] = row["id"]
         return found
 
     def set_role_permissions(self, role_id: int, ids: set[int]) -> None:
@@ -1040,6 +1066,14 @@ class Runner:
                 absent.append(name)
             else:
                 needed[name] = perm_id
+        for view, pid in self.client.named_permissions(
+            PUBLIC_EXTRA_PERMISSIONS
+        ).items():
+            needed[view] = pid
+        for permission, view in PUBLIC_EXTRA_PERMISSIONS:
+            if view not in needed:
+                absent.append(f"{permission} on {view}")
+
         missing = {name: pid for name, pid in needed.items() if pid not in current}
 
         if absent:
