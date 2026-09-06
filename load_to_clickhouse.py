@@ -11,7 +11,12 @@ from pathlib import Path
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-from growth import customer_maturity_days, load_growth_config, maturity_days
+from growth import (
+    customer_maturity_days,
+    load_growth_config,
+    maturity_days,
+    payment_settlement_days,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +229,10 @@ def ensure_marts(args) -> None:
     script = script.replace(
         "{{CUSTOMER_MATURITY_DAYS}}",
         str(customer_maturity_days(growth_config)),
+    )
+    script = script.replace(
+        "{{PAYMENT_SETTLEMENT_DAYS}}",
+        str(payment_settlement_days(growth_config)),
     )
 
     # Незакрытый плейсхолдер уехал бы в ClickHouse как синтаксическая

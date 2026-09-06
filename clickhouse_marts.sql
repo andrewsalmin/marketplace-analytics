@@ -99,7 +99,15 @@ SELECT
     created_at < (
         SELECT max(created_at) - INTERVAL {{MATURITY_DAYS}} DAY
         FROM marketplace_analytics.orders FINAL
-    ) AS is_mature
+    ) AS is_mature,
+    -- Отдельный, короткий горизонт: оплачен заказ или нет, ясно уже на
+    -- следующий день. Мерить оплаченный GMV отсечкой в is_mature значит
+    -- выбрасывать месяц данных ради вопроса, который давно решён, — и
+    -- получать карточку «оплачено за период» вдвое ниже графика рядом.
+    created_at < (
+        SELECT max(created_at) - INTERVAL {{PAYMENT_SETTLEMENT_DAYS}} DAY
+        FROM marketplace_analytics.orders FINAL
+    ) AS is_payment_settled
 FROM marketplace_analytics.orders FINAL;
 
 CREATE OR REPLACE VIEW marketplace_marts.payments AS
@@ -190,6 +198,7 @@ SELECT
     o.returned_at            AS returned_at,
     o.refunded_at            AS refunded_at,
     o.is_mature              AS is_mature,
+    o.is_payment_settled     AS is_payment_settled,
     c.city                   AS city,
     c.acquisition_channel    AS acquisition_channel,
     c.acquisition_channel_ru AS acquisition_channel_ru

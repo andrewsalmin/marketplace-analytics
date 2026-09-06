@@ -60,7 +60,7 @@ from typing import Any
 # как это делает conftest.py для тестов.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from growth import maturity_days  # noqa: E402
+from growth import maturity_days, payment_settlement_days  # noqa: E402
 
 try:
     import requests
@@ -84,6 +84,7 @@ MARTS_SCHEMA = "marketplace_marts"
 # load_to_clickhouse.py, чтобы текст под графиком не разошёлся с тем,
 # что реально посчитано.
 MATURITY_DAYS = maturity_days()
+PAYMENT_SETTLEMENT_DAYS = payment_settlement_days()
 
 # Раньше отсечка незрелых заказов жила прямо в фильтре чарта подзапросом.
 # Superset такие фильтры не исполняет (ALLOW_ADHOC_SUBQUERY=False) и
@@ -108,7 +109,21 @@ OBSOLETE_FILTERS = [
 # сознательно не выдаются.
 PUBLIC_EXTRA_PERMISSIONS = [("can_time_range", "Api")]
 
+# Горизонт зависит от того, что метрика измеряет, и путать их дорого.
+#
+# SETTLED — оплачен заказ или нет; ясно на следующий день. Этим отсекают
+# GMV и средний чек.
+#
+# MATURE — исход заказа целиком: отменён, возвращён, доставлен. Этим
+# отсекают доли отмен и возвратов, чистый GMV, структуру статусов и
+# воронку.
+#
+# Счётчики созданных заказов и регистраций не отсекаются вовсе: событие
+# уже произошло, ждать нечего. Раньше на всём стоял один MATURE, и
+# карточка «создано заказов» показывала 76 тысяч там, где график рядом
+# рисовал 132 — без единого слова о том, почему.
 MATURE_FILTER = ("is_mature = 1", "is_mature")
+SETTLED_FILTER = ("is_payment_settled = 1", "is_payment_settled")
 
 PAID = "paid_at IS NOT NULL"
 # «Чистый» — заказ, который дошёл до покупателя и остался у него:
@@ -378,11 +393,19 @@ def ensure_filter(filters: list[Any], expression: str, subject: str) -> list[Any
 
 
 def rolling_mean(days: int = 7) -> dict[str, Any]:
-    """P1-07: скользящее среднее вместо суточной пилы."""
+    """Скользящее среднее вместо суточной пилы.
+
+    min_periods=1, а не days: при days первые шесть дат исчезают с
+    графика молча, и период выглядит короче, чем он есть.
+
+    Применять только к счётчикам и суммам. У доли скользящее среднее
+    даёт среднее дневных долей, а это не доля за неделю: день с тремя
+    заказами весит столько же, сколько день с тысячей.
+    """
     return {
         "rolling_type": "mean",
         "rolling_periods": days,
-        "min_periods": days,
+        "min_periods": 1,
     }
 
 
@@ -483,12 +506,13 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             "phase": "p0",
             "dataset": "orders_with_customer_dim",
             "note": "P0-02 GMV только по оплаченным + P0-03 зрелый хвост",
-            "slice_name": "Динамика GMV",
+            "slice_name": "Динамика GMV (среднее за 7 дней)",
             "description": (
-                "«Оплачено» — сумма заказов с paid_at. «Чистый» дополнительно "
-                f"исключает отменённые и возвращённые. Последние "
-                f"{MATURITY_DAYS} дней отрезаны: заказ может менять статус "
-                "до истечения всех дедлайнов."
+                "«Оплачено» — сумма заказов с paid_at, «Чистый» дополнительно "
+                "исключает отменённые и возвращённые. Линия сглажена "
+                f"скользящим средним за 7 дней. Последние "
+                f"{PAYMENT_SETTLEMENT_DAYS} дня отрезаны: у заказа ещё не "
+                "истёк срок оплаты."
             ),
             "set": {
                 "metrics": [
@@ -499,20 +523,23 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 **DATE_AXIS,
                 **rolling_mean(),
             },
-            "filters": [MATURE_FILTER],
+            "filters": [SETTLED_FILTER],
         },
         "Изменение среднего чека (AOV)": {
             "phase": "p0",
             "dataset": "orders_with_customer_dim",
             "note": "P0-02 средний чек по оплаченным заказам",
-            "slice_name": "Динамика среднего чека (AOV)",
-            "description": "Сумма оплаченных заказов, делённая на их число.",
+            "slice_name": "Динамика среднего чека (среднее за 7 дней)",
+            "description": (
+                "Сумма оплаченных заказов, делённая на их число. Линия "
+                "сглажена скользящим средним за 7 дней."
+            ),
             "set": {
                 "metrics": [metric("Средний чек, ₽", AOV_PAID)],
                 **DATE_AXIS,
                 **rolling_mean(),
             },
-            "filters": [MATURE_FILTER],
+            "filters": [SETTLED_FILTER],
         },
         "Изменение долей отмен и возвратов": {
             "phase": "p0",
@@ -524,7 +551,10 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 f"{MATURITY_DAYS} дней отрезаны: свежий заказ ещё не успел "
                 "отмениться или вернуться."
             ),
-            "set": {"y_axis_format": ".1%", **DATE_AXIS, **rolling_mean()},
+            # Без сглаживания: скользящее среднее доли усредняет дневные
+            # доли, а не считает долю за неделю — день с тремя заказами
+            # весил бы столько же, сколько день с тысячей.
+            "set": {"y_axis_format": ".1%", **DATE_AXIS},
             "filters": [MATURE_FILTER],
         },
         "Изменение структуры статусов заказов": {
@@ -672,6 +702,11 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Число покупателей по городам": {
             "phase": "p1",
+            "slice_name": "Регистрации по городам",
+            "description": (
+                "Регистрации по городу покупателя. Это не число купивших: "
+                "часть аккаунтов остаётся без заказов."
+            ),
             "note": "P1-02 горизонтальные бары + сортировка",
             "set": {
                 "orientation": "horizontal",
@@ -694,6 +729,11 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Доли покупателей по каналам привлечения": {
             "phase": "p1",
+            "slice_name": "Доли регистраций по каналам привлечения",
+            "description": (
+                "Доли регистраций, а не покупателей: канал приводит "
+                "аккаунты, а купят они или нет — отдельный вопрос."
+            ),
             "note": "P1-03 подписи внутри пирога + P2-06 словарь из витрины",
             "set": {
                 "groupby": ["acquisition_channel_ru"],
@@ -735,7 +775,6 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "truncateYAxis": True,
                 "y_axis_bounds": [0.5, 1],
                 **DATE_AXIS,
-                **rolling_mean(),
             },
         },
         "Тренд DQ-ошибок по сущностям": {
@@ -804,13 +843,22 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             "phase": "p1",
             "dataset": "orders_with_customer_dim",
             "note": "P1-01 формат оси + P1-07 сглаживание + P1-11 заголовок",
-            "slice_name": "Динамика числа заказов",
+            "slice_name": "Динамика числа заказов (среднее за 7 дней)",
+            "description": (
+                "Созданные заказы, сглажено скользящим средним за 7 дней. "
+                "Горизонт зрелости здесь не применяется: заказ уже создан, "
+                "ждать нечего."
+            ),
             "set": {**DATE_AXIS, **rolling_mean()},
         },
         "Изменение числа новых покупателей": {
             "phase": "p1",
             "note": "P1-01 формат оси + P1-07 сглаживание + P1-11 заголовок",
-            "slice_name": "Динамика числа новых покупателей",
+            "slice_name": "Динамика регистраций (среднее за 7 дней)",
+            "description": (
+                "Считаются регистрации по дате создания аккаунта, а не "
+                "покупатели: часть из них не сделает ни одного заказа."
+            ),
             "set": {**DATE_AXIS, **rolling_mean()},
         },
         "Изменение числа новых и повторных заказов": {
@@ -876,7 +924,7 @@ KPI_CHARTS: list[dict[str, Any]] = [
         "metric": metric("GMV, ₽", GMV_PAID),
         "format": "SMART_NUMBER",
         "subheader": "Оплаченные заказы за период",
-        "filters": [MATURE_FILTER],
+        "filters": [SETTLED_FILTER],
     },
     {
         "name": "KPI · Заказы",
@@ -884,7 +932,10 @@ KPI_CHARTS: list[dict[str, Any]] = [
         "metric": metric("Заказов", "count()"),
         "format": "SMART_NUMBER",
         "subheader": "Создано заказов",
-        "filters": [MATURE_FILTER],
+        # Без горизонта: заказ создан, его судьба на счётчик не влияет.
+        # С MATURE карточка показывала 76 тысяч там, где график рядом
+        # рисовал 132.
+        "filters": [],
     },
     {
         "name": "KPI · Средний чек",
@@ -892,14 +943,14 @@ KPI_CHARTS: list[dict[str, Any]] = [
         "metric": metric("Средний чек, ₽", AOV_PAID),
         "format": ",.0f",
         "subheader": "На оплаченный заказ",
-        "filters": [MATURE_FILTER],
+        "filters": [SETTLED_FILTER],
     },
     {
         "name": "KPI · Доля отмен",
         "dataset": "orders_with_customer_dim",
         "metric": metric("Доля отмен", "countIf(cancelled_at IS NOT NULL) / count()"),
         "format": ".1%",
-        "subheader": "От числа созданных заказов",
+        "subheader": f"От созданных заказов старше {MATURITY_DAYS} дней",
         "filters": [MATURE_FILTER],
     },
     {

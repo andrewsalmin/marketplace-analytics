@@ -42,6 +42,10 @@ def rendered_sql(marts_sql: str) -> str:
             "{{CUSTOMER_MATURITY_DAYS}}",
             str(growth.customer_maturity_days(config)),
         )
+        .replace(
+            "{{PAYMENT_SETTLEMENT_DAYS}}",
+            str(growth.payment_settlement_days(config)),
+        )
     )
 
 
@@ -131,7 +135,11 @@ def test_no_deadline_is_hardcoded_in_sql(marts_sql):
     молча расходящаяся с growth_config.json.
     """
     intervals = set(re.findall(r"INTERVAL (\S+) DAY", marts_sql))
-    assert intervals == {"{{MATURITY_DAYS}}", "{{CUSTOMER_MATURITY_DAYS}}"}
+    assert intervals == {
+            "{{MATURITY_DAYS}}",
+            "{{CUSTOMER_MATURITY_DAYS}}",
+            "{{PAYMENT_SETTLEMENT_DAYS}}",
+        }
 
 
 # ---------------------------------------------------------------------

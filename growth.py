@@ -46,6 +46,23 @@ def maturity_days(growth_config: dict | None = None) -> int:
     )
 
 
+def payment_settlement_days(growth_config: dict | None = None) -> int:
+    """Через сколько дней ясно, оплачен заказ или нет.
+
+    Отдельный, гораздо более короткий горизонт, чем maturity_days: судьба
+    оплаты решается дедлайном оплаты, а не суммой всех дедлайнов вплоть до
+    окна возврата. Мерить оплаченный GMV с отсечкой в 34 дня значит
+    выбрасывать месяц данных ради вопроса, ответ на который известен на
+    следующий день.
+
+    День про запас — на заказы, созданные под конец суток: их дедлайн
+    истекает уже в следующей календарной дате.
+    """
+    config = growth_config if growth_config is not None else load_growth_config()
+
+    return math.ceil(config["payment_deadline_hours"] / 24) + 1
+
+
 def customer_maturity_days(growth_config: dict | None = None) -> int:
     """Через сколько дней после регистрации покупателя можно оценивать.
 
