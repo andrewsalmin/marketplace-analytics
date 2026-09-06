@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import copy
 import getpass
+import hashlib
 import json
 import os
 import pathlib
@@ -360,7 +361,16 @@ def sql_filter(expression: str, subject: str) -> dict[str, Any]:
         "expressionType": "SQL",
         "sqlExpression": expression,
         "subject": subject,
-        "filterOptionName": f"filter_{_slug(subject)}_{abs(hash(expression)) % 10**8}",
+        # sha1, а не hash(): встроенный hash солится на каждый процесс,
+        # поэтому имя фильтра менялось от запуска к запуску. Сверка
+        # «совпадает ли чарт с описанием» всегда видела различие и
+        # переписывала карточки на каждом прогоне — идемпотентность была
+        # мнимой, а тест этого не ловил, потому что внутри одного
+        # процесса hash стабилен.
+        "filterOptionName": (
+            f"filter_{_slug(subject)}_"
+            + hashlib.sha1(expression.encode("utf-8")).hexdigest()[:8]
+        ),
     }
 
 

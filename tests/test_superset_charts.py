@@ -158,3 +158,22 @@ class TestSyncBigNumbers:
         ids = runner.sync_big_numbers([self._spec()])
         assert runner.client.posts, "карточки не было — её надо создать"
         assert ids["KPI · Заказы"] == 999
+
+
+class TestFilterNamesAreStable:
+    """Имя фильтра обязано быть одинаковым от запуска к запуску.
+
+    Иначе сверка «чарт совпадает с описанием» всегда видит различие и
+    переписывает его на каждом прогоне. Встроенный hash() для этого не
+    годится: он солится на каждый процесс. Значение здесь прибито
+    гвоздями — тест внутри одного процесса нестабильность не поймает.
+    """
+
+    def test_option_name_is_pinned(self):
+        got = arf.sql_filter("is_mature = 1", "is_mature")["filterOptionName"]
+        assert got == "filter_is_mature_190d569c", got
+
+    def test_different_expressions_differ(self):
+        a = arf.sql_filter("is_mature = 1", "x")["filterOptionName"]
+        b = arf.sql_filter("is_payment_settled = 1", "x")["filterOptionName"]
+        assert a != b
