@@ -23,11 +23,16 @@ no-op на уже загруженный день.
 ## Запуск
 
 ```bash
-pip install requests
+pip install -r requirements-superset.txt
 
 python superset/apply_review_fixes.py --url http://superset.example.com:8088 \
     --username admin --phases p0,p1,p2
 ```
+
+Зависимость одна — `requests`; она вынесена отдельным файлом и
+намеренно не тянет `requirements.txt`: скрипт ходит по HTTP и не
+трогает данные, pandas и pyspark ему не нужны. Для воспроизводимой
+установки есть `requirements-superset.lock` с хешами.
 
 Пароль скрипт спросит скрытым вводом. Передавать его в командной строке
 не нужно: оттуда он попадает в историю оболочки и в список процессов.
