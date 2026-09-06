@@ -44,13 +44,19 @@ def config() -> dict:
 
 
 def query_via_client(sql: str) -> str:
-    return subprocess.run(
+    done = subprocess.run(
         ["clickhouse-client", "--query", sql],
         capture_output=True,
         text=True,
         timeout=120,
-        check=True,
-    ).stdout
+        check=False,
+    )
+    if done.returncode != 0:
+        # Не CalledProcessError: её текст сообщает только код выхода, а
+        # разбираться приходится по тому, что сказал ClickHouse.
+        lines = (done.stderr or "").strip().splitlines()
+        raise RuntimeError(lines[-1] if lines else f"код выхода {done.returncode}")
+    return done.stdout
 
 
 def query_via_http(sql: str) -> str:
