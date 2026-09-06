@@ -226,16 +226,19 @@ class Superset:
         )["result"]
         return {row["id"] for row in result}
 
-    def datasource_permissions(self, schema: str) -> dict[str, int]:
-        """Разрешения datasource_access на витрины схемы: имя -> id.
+    def datasource_permissions(self) -> dict[int, int]:
+        """Разрешения datasource_access: id датасета -> id разрешения.
 
-        Superset называет их по шаблону [база].[схема].[таблица](id:N),
-        поэтому отбор идёт по подстроке `.[схема].`, а не по точному
-        совпадению: имя базы в разных инсталляциях своё.
+        Сопоставление идёт по `(id:N)` в конце имени, а не по разбору
+        `[база].[схема].[таблица]`: схемы в имени нет вовсе — Superset
+        называет разрешение `[база].[таблица](id:N)`. Разбор по схеме
+        не находил ничего, и скрипт считал, что прав на витрины не
+        существует. Привязка к id заодно переживает переименование
+        датасета и смену имени базы.
         """
-        found: dict[str, int] = {}
+        found: dict[int, int] = {}
         page = 0
-        while True:
+        while page < 50:  # предохранитель от бесконечной страницы
             query = json.dumps({"page_size": 100, "page": page})
             result = self.get(
                 f"/api/v1/security/permissions-resources/?q={query}"
@@ -243,18 +246,13 @@ class Superset:
             if not result:
                 break
             for row in result:
-                permission = (row.get("permission") or {}).get("name")
+                if (row.get("permission") or {}).get("name") != "datasource_access":
+                    continue
                 view_menu = (row.get("view_menu") or {}).get("name") or ""
-                if permission != "datasource_access":
-                    continue
-                marker = f".[{schema}]."
-                if marker not in view_menu:
-                    continue
-                table = view_menu.split(marker, 1)[1].split("]")[0].lstrip("[")
-                found[table] = row["id"]
+                match = re.search(r"\(id:(\d+)\)\s*$", view_menu)
+                if match:
+                    found[int(match.group(1))] = row["id"]
             page += 1
-            if page > 50:  # предохранитель от бесконечной страницы
-                break
         return found
 
     def set_role_permissions(self, role_id: int, ids: set[int]) -> None:
@@ -1031,16 +1029,23 @@ class Runner:
             return
 
         current = self.client.role_permission_ids(role["id"])
-        available = self.client.datasource_permissions(MARTS_SCHEMA)
+        available = self.client.datasource_permissions()
 
-        needed = {name: available[name] for name in DATASETS if name in available}
-        absent = [name for name in DATASETS if name not in available]
+        needed: dict[str, int] = {}
+        absent: list[str] = []
+        for name in DATASETS:
+            dataset = self.datasets.get(name)
+            perm_id = available.get(dataset["id"]) if dataset else None
+            if perm_id is None:
+                absent.append(name)
+            else:
+                needed[name] = perm_id
         missing = {name: pid for name, pid in needed.items() if pid not in current}
 
         if absent:
             print(
                 f"  ! нет объектов прав на витрины: {', '.join(absent)} — "
-                "похоже, датасеты ещё не переведены на схему"
+                "датасета либо нет, либо Superset не завёл на него разрешение"
             )
         if not missing:
             return

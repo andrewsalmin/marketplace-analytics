@@ -5,6 +5,10 @@
 заменяет весь список. Ошибка в отборе оставила бы Public без доступа к
 самому дашборду, и заметили бы это уже посетители.
 
+Второе, что здесь закреплено, — формат имени разрешения. Superset
+называет его `[база].[таблица](id:N)`, без схемы; попытка разбирать имя
+по схеме находила ноль прав, и скрипт молча решал, что выдавать нечего.
+
 Живого Superset здесь нет — клиент подменяется заглушкой, поэтому
 проверяются разбор имён и арифметика множеств, а не HTTP.
 """
@@ -27,8 +31,8 @@ _spec.loader.exec_module(arf)
 class FakeClient:
     """Заглушка Superset: помнит права роли и записанные вызовы."""
 
-    def __init__(self, permissions_by_schema=None, role_permissions=None):
-        self.permissions_by_schema = permissions_by_schema or {}
+    def __init__(self, permissions=None, role_permissions=None):
+        self.permissions = dict(permissions or {})
         self.role_permissions = set(role_permissions or [])
         self.written: list[set[int]] = []
 
@@ -38,8 +42,8 @@ class FakeClient:
     def role_permission_ids(self, role_id):
         return set(self.role_permissions)
 
-    def datasource_permissions(self, schema):
-        return dict(self.permissions_by_schema.get(schema, {}))
+    def datasource_permissions(self):
+        return dict(self.permissions)
 
     def set_role_permissions(self, role_id, ids):
         self.written.append(set(ids))
@@ -52,17 +56,30 @@ def _isolate_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
 
-def make_runner(client, apply=True):
+def _all_datasets(first_id=1):
+    """Датасеты витрин так, как их видит скрипт: имя -> запись с id."""
+    return {
+        name: {"id": first_id + i, "table_name": name}
+        for i, name in enumerate(arf.DATASETS)
+    }
+
+
+def _all_permissions(datasets, first_perm=500):
+    """Разрешение datasource_access на каждый датасет: id -> id."""
+    return {d["id"]: first_perm + i for i, d in enumerate(datasets.values())}
+
+
+def make_runner(client, datasets=None, apply=True):
     runner = arf.Runner.__new__(arf.Runner)
     runner.client = client
     runner.apply = apply
     runner.planned = []
-    runner.datasets = {}
+    runner.datasets = datasets if datasets is not None else _all_datasets()
     return runner
 
 
 # ---------------------------------------------------------------------
-# Разбор имён прав
+# Разбор имён разрешений
 # ---------------------------------------------------------------------
 
 
@@ -79,46 +96,35 @@ class TestDatasourcePermissionParsing:
 
         return C()
 
-    def test_picks_only_datasource_access_in_the_marts_schema(self):
+    def test_matches_by_dataset_id_not_by_schema(self):
+        """Схемы в имени нет — сопоставление идёт по (id:N)."""
         rows = [
             {
-                "id": 1,
+                "id": 11,
                 "permission": {"name": "datasource_access"},
-                "view_menu": {
-                    "name": "[ClickHouse].[marketplace_marts].[orders](id:5)"
-                },
+                "view_menu": {"name": "[Marketplace Analytics].[orders](id:42)"},
             },
             {
-                "id": 2,
-                "permission": {"name": "datasource_access"},
-                "view_menu": {
-                    "name": "[ClickHouse].[marketplace_analytics].[orders](id:2)"
-                },
-            },
-            {
-                "id": 3,
+                "id": 12,
                 "permission": {"name": "can_read"},
-                "view_menu": {"name": "[ClickHouse].[marketplace_marts].[payments]"},
+                "view_menu": {"name": "[Marketplace Analytics].[payments](id:43)"},
             },
         ]
-        found = self._client(rows).datasource_permissions("marketplace_marts")
-        assert found == {"orders": 1}, "чужая схема или чужое право не должны попасть"
+        assert self._client(rows).datasource_permissions() == {42: 11}
 
-    def test_handles_names_without_the_id_suffix(self):
+    def test_ignores_names_without_an_id(self):
         rows = [
             {
-                "id": 9,
+                "id": 13,
                 "permission": {"name": "datasource_access"},
-                "view_menu": {"name": "[CH].[marketplace_marts].[load_freshness]"},
+                "view_menu": {"name": "[Marketplace Analytics].[legacy]"},
             }
         ]
-        assert self._client(rows).datasource_permissions("marketplace_marts") == {
-            "load_freshness": 9
-        }
+        assert self._client(rows).datasource_permissions() == {}
 
     def test_survives_rows_without_permission_or_view_menu(self):
         rows = [{"id": 4, "permission": None, "view_menu": None}]
-        assert self._client(rows).datasource_permissions("marketplace_marts") == {}
+        assert self._client(rows).datasource_permissions() == {}
 
 
 # ---------------------------------------------------------------------
@@ -127,33 +133,28 @@ class TestDatasourcePermissionParsing:
 
 
 class TestGrantPublicAccess:
-    def _available(self, ids_from=100):
-        return {
-            "marketplace_marts": {
-                name: ids_from + i for i, name in enumerate(arf.DATASETS)
-            }
-        }
-
     def test_existing_permissions_are_never_dropped(self):
         """Главное свойство: роль не должна потерять то, что у неё было."""
+        datasets = _all_datasets()
+        perms = _all_permissions(datasets)
         unrelated = {1, 2, 3}  # доступ к дашборду, чартам и прочему
-        client = FakeClient(self._available(), role_permissions=unrelated)
+        client = FakeClient(perms, role_permissions=unrelated)
 
-        make_runner(client).grant_public_access("Public")
+        make_runner(client, datasets).grant_public_access("Public")
 
         assert client.written, "запись должна была произойти"
         written = client.written[0]
-        snapshots = list(Path.cwd().glob("superset_role_Public_*.json"))
-        assert snapshots, "перед записью обязан появиться снимок прав"
+        assert list(
+            Path.cwd().glob("superset_role_Public_*.json")
+        ), "перед записью обязан появиться снимок прав"
         assert unrelated <= written, "прежние права обязаны уцелеть"
-        assert set(self._available()["marketplace_marts"].values()) <= written
+        assert set(perms.values()) <= written
 
     def test_nothing_is_written_when_access_is_already_granted(self):
-        available = self._available()
-        client = FakeClient(
-            available, role_permissions=set(available["marketplace_marts"].values())
-        )
-        runner = make_runner(client)
+        datasets = _all_datasets()
+        perms = _all_permissions(datasets)
+        client = FakeClient(perms, role_permissions=set(perms.values()))
+        runner = make_runner(client, datasets)
 
         runner.grant_public_access("Public")
 
@@ -161,8 +162,9 @@ class TestGrantPublicAccess:
         assert runner.planned == []
 
     def test_plan_mode_does_not_write(self):
-        client = FakeClient(self._available(), role_permissions={1})
-        runner = make_runner(client, apply=False)
+        datasets = _all_datasets()
+        client = FakeClient(_all_permissions(datasets), role_permissions={1})
+        runner = make_runner(client, datasets, apply=False)
 
         runner.grant_public_access("Public")
 
@@ -170,13 +172,15 @@ class TestGrantPublicAccess:
         assert runner.planned, "но в план правка попасть должна"
 
     def test_unknown_role_is_reported_and_skipped(self):
-        client = FakeClient(self._available(), role_permissions={1})
-        make_runner(client).grant_public_access("НетТакойРоли")
+        datasets = _all_datasets()
+        client = FakeClient(_all_permissions(datasets), role_permissions={1})
+        make_runner(client, datasets).grant_public_access("НетТакойРоли")
         assert client.written == []
 
     def test_raises_when_the_write_loses_permissions(self):
         """Если Superset заменил список вместо объединения — падаем громко."""
-        client = FakeClient(self._available(), role_permissions={1, 2})
+        datasets = _all_datasets()
+        client = FakeClient(_all_permissions(datasets), role_permissions={1, 2})
 
         def losing_write(role_id, ids):
             client.written.append(set(ids))
@@ -185,15 +189,27 @@ class TestGrantPublicAccess:
         client.set_role_permissions = losing_write
 
         with pytest.raises(arf.SupersetError, match="потеряла"):
-            make_runner(client).grant_public_access("Public")
+            make_runner(client, datasets).grant_public_access("Public")
 
-    def test_missing_marts_are_reported_not_silently_skipped(self, capsys):
-        """Датасеты ещё не переведены — об этом надо сказать, а не молчать."""
-        partial = {"marketplace_marts": {"orders": 100}}
-        client = FakeClient(partial, role_permissions=set())
+    def test_dataset_without_a_permission_object_is_reported(self, capsys):
+        """Права на датасет ещё не заведены — сказать, а не промолчать."""
+        datasets = _all_datasets()
+        perms = _all_permissions(datasets)
+        perms.pop(datasets["customers"]["id"])
+        client = FakeClient(perms, role_permissions=set())
 
-        make_runner(client).grant_public_access("Public")
+        make_runner(client, datasets).grant_public_access("Public")
 
         printed = capsys.readouterr().out
-        assert "не переведены" in printed
         assert "customers" in printed
+        assert "нет объектов прав" in printed
+
+    def test_dataset_missing_entirely_is_reported(self, capsys):
+        """Датасета нет вовсе — повод сказать, а не упасть по KeyError."""
+        datasets = _all_datasets()
+        datasets.pop("orders")
+        client = FakeClient(_all_permissions(datasets), role_permissions=set())
+
+        make_runner(client, datasets).grant_public_access("Public")
+
+        assert "orders" in capsys.readouterr().out
