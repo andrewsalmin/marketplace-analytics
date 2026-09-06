@@ -255,6 +255,12 @@ def run_all() -> list[str]:
             evaluate(name, why, query(sql))
         except AssertionError as exc:
             failures.append(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            # Витрину удалили, SQL сломали, база не отвечает — для
+            # пайплайна это такое же расхождение, как неверная цифра.
+            # Трейсбек здесь ничего не добавит: важно, какая проверка и
+            # что ответило хранилище.
+            failures.append(f"{name}: запрос не выполнился — {exc}")
         else:
             print(f"  OK  {name}")
     return failures
