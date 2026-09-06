@@ -136,6 +136,38 @@ NOT_CANCELLED = (
 )
 
 
+CREDENTIALS_PATH = pathlib.Path.home() / ".superset" / "credentials.json"
+
+
+def load_credentials(path: pathlib.Path) -> dict[str, str]:
+    """Читает url/username/password из файла, если он есть.
+
+    Существует затем, чтобы скрипт можно было запускать без участия
+    человека, не передавая пароль ни аргументом, ни переменной
+    окружения: аргументы видны в списке процессов, окружение — в
+    /proc и в дампах. Тот же приём, что у clickhouse-client с его
+    ~/.clickhouse-client/config.xml.
+    """
+    if not path.exists():
+        return {}
+
+    # Файл с паролем, доступный кому-то ещё, — это не защита, а её
+    # видимость. Лучше отказаться, чем молча воспользоваться.
+    mode = path.stat().st_mode
+    if mode & 0o077:
+        raise SupersetError(
+            f"{path} доступен не только владельцу (права {mode & 0o777:o}). "
+            "Выполни chmod 600 и повтори."
+        )
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise SupersetError(f"{path}: не разбирается как JSON — {exc}") from exc
+
+    return {k: str(v) for k, v in data.items() if k in {"url", "username", "password"}}
+
+
 # ---------------------------------------------------------------------------
 # Клиент Superset
 # ---------------------------------------------------------------------------
@@ -226,6 +258,11 @@ class Superset:
         return self._check(
             self.session.post(f"{self.base}{path}", json=payload, timeout=60),
             f"POST {path}",
+        )
+
+    def delete(self, path: str) -> dict[str, Any]:
+        return self._check(
+            self.session.delete(f"{self.base}{path}", timeout=60), f"DELETE {path}"
         )
 
     def export_dashboard(self, dashboard_id: int, dest: str) -> str:
@@ -1697,6 +1734,16 @@ def main() -> int:
     )
     parser.add_argument("--dashboard", type=int, default=1, help="id дашборда")
     parser.add_argument(
+        "--credentials",
+        default=str(CREDENTIALS_PATH),
+        help=f"файл с url/username/password (по умолчанию {CREDENTIALS_PATH})",
+    )
+    parser.add_argument(
+        "--delete-charts",
+        default="",
+        help="удалить чарты по id через запятую; ссылающиеся на дашборд не трогает",
+    )
+    parser.add_argument(
         "--diagnose",
         action="store_true",
         help="показать, что API отдаёт по датасетам, и выйти",
@@ -1711,9 +1758,22 @@ def main() -> int:
     parser.add_argument("--password", default=os.environ.get("SUPERSET_PASSWORD"))
     args = parser.parse_args()
 
+    # Порядок: явный аргумент, потом окружение, потом файл кредов.
+    # Файл — последний, чтобы разовый запуск с другими параметрами не
+    # требовал его править.
+    try:
+        stored = load_credentials(pathlib.Path(args.credentials).expanduser())
+    except SupersetError as exc:
+        return _fail(str(exc))
+
+    args.url = args.url or stored.get("url")
+    args.username = args.username or stored.get("username")
+    args.password = args.password or stored.get("password")
+
     if not (args.url and args.username):
         return _fail(
-            "Нужны SUPERSET_URL и SUPERSET_USERNAME (или --url/--username)"
+            "Нужны SUPERSET_URL и SUPERSET_USERNAME (или --url/--username, "
+            f"или {args.credentials})"
         )
 
     # Пароль в командной строке оседает в истории оболочки и виден в
@@ -1746,6 +1806,14 @@ def main() -> int:
 
     if args.diagnose:
         return diagnose(client, args.username, password)
+
+    if args.delete_charts:
+        try:
+            ids = [int(x) for x in args.delete_charts.split(",") if x.strip()]
+        except ValueError:
+            return _fail("--delete-charts принимает id через запятую")
+        print("Удаление чартов:")
+        return delete_charts(client, args.dashboard, ids, args.apply)
 
     if args.apply:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1780,6 +1848,60 @@ def main() -> int:
     print(f"\nИтого изменений: {len(runner.planned)}")
     if not args.apply and runner.planned:
         print("Повтори с --apply, чтобы записать.")
+    return 0
+
+
+def delete_charts(
+    client: Superset, dashboard_id: int, ids: list[int], apply: bool
+) -> int:
+    """Удаляет чарты по явному списку id.
+
+    Только по id и только по явному списку: удаление необратимо, и
+    угадывать «лишнее» по имени тут нельзя. Чарт, на который ссылается
+    раскладка дашборда, не удаляется ни при каких условиях — именно так
+    выглядела бы опечатка в списке.
+    """
+    detail = client.get(f"/api/v1/dashboard/{dashboard_id}")["result"]
+    position = json.loads(detail.get("position_json") or "{}")
+    in_use = {
+        node["meta"]["chartId"]
+        for node in position.values()
+        if isinstance(node, dict)
+        and node.get("type") == "CHART"
+        and node.get("meta", {}).get("chartId")
+    }
+
+    query = json.dumps({"columns": ["id", "slice_name"], "page_size": 100})
+    names = {
+        row["id"]: row["slice_name"]
+        for row in client.get(f"/api/v1/chart/?q={query}")["result"]
+    }
+
+    doomed = []
+    for chart_id in ids:
+        if chart_id not in names:
+            print(f"  ! чарта {chart_id} нет — пропуск")
+            continue
+        if chart_id in in_use:
+            print(
+                f"  ! чарт {chart_id} «{names[chart_id]}» стоит на дашборде "
+                "— не удаляю"
+            )
+            continue
+        doomed.append(chart_id)
+        print(f"  {'✓' if apply else '·'} {chart_id} «{names[chart_id]}»")
+
+    if not doomed:
+        print("Удалять нечего.")
+        return 0
+
+    if not apply:
+        print(f"\nБудет удалено: {len(doomed)}. Повтори с --apply.")
+        return 0
+
+    for chart_id in doomed:
+        client.delete(f"/api/v1/chart/{chart_id}")
+    print(f"\nУдалено: {len(doomed)}")
     return 0
 
 

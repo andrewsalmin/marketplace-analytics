@@ -197,3 +197,60 @@ class TestFilterNamesAreStable:
         a = arf.sql_filter("is_mature = 1", "x")["filterOptionName"]
         b = arf.sql_filter("is_payment_settled = 1", "x")["filterOptionName"]
         assert a != b
+
+
+class TestDeleteCharts:
+    """Удаление необратимо — защита от сноса нужного обязана быть."""
+
+    class _Client:
+        def __init__(self, position, charts):
+            self.position = position
+            self.charts = charts
+            self.deleted = []
+
+        def get(self, path):
+            if path.startswith("/api/v1/dashboard/"):
+                return {"result": {"position_json": json.dumps(self.position)}}
+            return {"result": self.charts}
+
+        def delete(self, path):
+            self.deleted.append(int(path.rsplit("/", 1)[1]))
+            return {}
+
+    def _client(self):
+        position = {
+            "CHART-a": {"type": "CHART", "meta": {"chartId": 38}},
+            "ROW-x": {"type": "ROW", "children": ["CHART-a"]},
+        }
+        charts = [
+            {"id": 38, "slice_name": "KPI · GMV"},
+            {"id": 44, "slice_name": "KPI · GMV"},
+        ]
+        return self._Client(position, charts)
+
+    def test_chart_on_the_dashboard_is_never_deleted(self, capsys):
+        client = self._client()
+        arf.delete_charts(client, 1, [38], apply=True)
+        assert client.deleted == [], "чарт с дашборда удалять нельзя"
+        assert "стоит на дашборде" in capsys.readouterr().out
+
+    def test_duplicate_outside_the_dashboard_is_deleted(self):
+        client = self._client()
+        arf.delete_charts(client, 1, [44], apply=True)
+        assert client.deleted == [44]
+
+    def test_plan_mode_deletes_nothing(self):
+        client = self._client()
+        arf.delete_charts(client, 1, [44], apply=False)
+        assert client.deleted == []
+
+    def test_unknown_id_is_reported(self, capsys):
+        client = self._client()
+        arf.delete_charts(client, 1, [999], apply=True)
+        assert client.deleted == []
+        assert "нет" in capsys.readouterr().out
+
+    def test_mixed_list_deletes_only_the_safe_ones(self):
+        client = self._client()
+        arf.delete_charts(client, 1, [38, 44, 999], apply=True)
+        assert client.deleted == [44]
