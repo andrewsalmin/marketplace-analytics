@@ -1526,8 +1526,39 @@ def diagnose(client: Superset) -> int:
     try:
         me = client.get("/api/v1/me/")["result"]
         print(f"Пользователь: {me.get('username')} ({me.get('email')})")
+        print(f"  поля /api/v1/me/: {', '.join(sorted(me))}")
+        if me.get("roles"):
+            print(f"  роли: {me['roles']}")
     except SupersetError as exc:
         print(f"Пользователь: не удалось узнать — {exc}")
+
+    # Ключевой вопрос: есть ли у ролей all_datasource_access. Без него
+    # Superset отдаёт только датасеты, выданные поимённо или по схеме, —
+    # ровно то, что мы и наблюдаем.
+    try:
+        roles = client.get("/api/v1/security/roles/?q=" + json.dumps(
+            {"page_size": 100}
+        ))["result"]
+        print(f"\nРолей в инстансе: {len(roles)}")
+        for role in roles:
+            perms = client.role_permission_ids(role["id"])
+            print(f"  {role['name']}: разрешений {len(perms)}")
+    except SupersetError as exc:
+        print(f"Роли: не удалось прочитать — {exc}")
+
+    try:
+        wide = [
+            row
+            for row in client.get(
+                "/api/v1/security/permissions-resources/?q="
+                + json.dumps({"page_size": 100})
+            )["result"]
+            if (row.get("permission") or {}).get("name")
+            in {"all_datasource_access", "all_database_access"}
+        ]
+        print(f"Объекты широкого доступа: {[r['id'] for r in wide]}")
+    except SupersetError as exc:
+        print(f"Широкий доступ: не удалось прочитать — {exc}")
 
     variants = {
         "как в скрипте": json.dumps(
