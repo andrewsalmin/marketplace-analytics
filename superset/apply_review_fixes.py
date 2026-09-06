@@ -1630,6 +1630,37 @@ def diagnose(client: Superset, username: str, password: str) -> int:
     except SupersetError as exc:
         print(f"Широкий доступ: не удалось прочитать — {exc}")
 
+    # Полная выгрузка: имена ресурсов различаются между версиями, и
+    # искать нужное по одному предположению за раз слишком дорого.
+    try:
+        rows = client._permission_rows()
+        roles_dump = {}
+        for role in client.get(
+            "/api/v1/security/roles/?q=" + json.dumps({"page_size": 100})
+        )["result"]:
+            roles_dump[role["name"]] = sorted(
+                client.role_permission_ids(role["id"])
+            )
+        dump = {
+            "permissions": [
+                {
+                    "id": r.get("id"),
+                    "permission": (r.get("permission") or {}).get("name"),
+                    "resource": (r.get("view_menu") or {}).get("name"),
+                }
+                for r in rows
+            ],
+            "roles": roles_dump,
+        }
+        with open("superset_permissions.json", "w", encoding="utf-8") as fh:
+            json.dump(dump, fh, ensure_ascii=False, indent=1)
+        print(
+            f"Полная выгрузка прав: superset_permissions.json "
+            f"({len(rows)} разрешений, {len(roles_dump)} ролей)"
+        )
+    except (SupersetError, AttributeError, OSError) as exc:
+        print(f"Выгрузка прав не удалась — {exc}")
+
     # Имя ресурса, отвечающего за разбор выражений периода, различается
     # между версиями Superset. Печатаем всё похожее, чтобы не угадывать.
     try:

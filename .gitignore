@@ -17,3 +17,8 @@ venv/
 
 # Логи прогонов пайплайна — артефакт запуска.
 pipeline.log
+
+# Выгрузка прав Superset — диагностический артефакт.
+superset_permissions.json
+superset_role_*.json
+superset_backup_*.zip
