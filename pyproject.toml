@@ -30,6 +30,7 @@ py-modules = [
     "generate_data",
     "growth",
     "ingest_csv_to_raw",
+    "clickhouse_ddl",
     "load_to_clickhouse",
     "marts_checks",
     "transform",
