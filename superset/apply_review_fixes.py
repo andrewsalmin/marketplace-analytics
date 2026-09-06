@@ -1630,6 +1630,25 @@ def diagnose(client: Superset, username: str, password: str) -> int:
     except SupersetError as exc:
         print(f"Широкий доступ: не удалось прочитать — {exc}")
 
+    # Имя ресурса, отвечающего за разбор выражений периода, различается
+    # между версиями Superset. Печатаем всё похожее, чтобы не угадывать.
+    try:
+        rows = client._permission_rows()
+        interesting = sorted(
+            {
+                f"{(r.get('permission') or {}).get('name')} on "
+                f"{(r.get('view_menu') or {}).get('name')}"
+                for r in rows
+                if "time" in ((r.get("view_menu") or {}).get("name") or "").lower()
+                or "range" in ((r.get("view_menu") or {}).get("name") or "").lower()
+            }
+        )
+        print(f"Похожие на «период» ресурсы ({len(interesting)}):")
+        for line in interesting:
+            print(f"    {line}")
+    except (SupersetError, AttributeError) as exc:
+        print(f"Ресурсы периода: не удалось прочитать — {exc}")
+
     variants = {
         "как в скрипте": json.dumps(
             {
