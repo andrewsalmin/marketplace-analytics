@@ -88,13 +88,19 @@ class TestSyncBigNumbers:
     """KPI-карточки должны не только создаваться, но и обновляться."""
 
     class _Client:
-        def __init__(self, charts):
-            self.charts = charts
+        """Карточки дашборда и общий список инстанса — разные вещи."""
+
+        def __init__(self, dashboard_charts, elsewhere=None):
+            self.dashboard_charts = dashboard_charts
+            self.elsewhere = [] if elsewhere is None else elsewhere
             self.puts = []
             self.posts = []
 
+        def charts(self, dashboard_id):
+            return {c["slice_name"]: c for c in self.dashboard_charts}
+
         def get(self, path):
-            return {"result": self.charts}
+            return {"result": self.elsewhere}
 
         def put(self, path, payload):
             self.puts.append((path, payload))
@@ -104,9 +110,9 @@ class TestSyncBigNumbers:
             self.posts.append((path, payload))
             return {"id": 999}
 
-    def _runner(self, charts, apply=True):
+    def _runner(self, dashboard_charts, elsewhere=None, apply=True):
         runner = arf.Runner.__new__(arf.Runner)
-        runner.client = self._Client(charts)
+        runner.client = self._Client(dashboard_charts, elsewhere)
         runner.apply = apply
         runner.planned = []
         runner.datasets = {"orders": {"id": 15}}
@@ -130,7 +136,7 @@ class TestSyncBigNumbers:
         stale = {
             "id": 7,
             "slice_name": "KPI · Заказы",
-            "params": '{"subheader": "устаревшая подпись"}',
+            "form_data": {"subheader": "устаревшая подпись"},
         }
         runner = self._runner([stale])
 
@@ -141,12 +147,12 @@ class TestSyncBigNumbers:
         assert written["subheader"] == "Создано заказов"
 
     def test_card_matching_the_spec_is_left_alone(self):
-        runner = self._runner([])
-        runner.sync_big_numbers([self._spec()])
-        created = json.loads(runner.client.posts[0][1]["params"])
+        created = self._runner([])
+        created.sync_big_numbers([self._spec()])
+        params = json.loads(created.client.posts[0][1]["params"])
 
         settled = self._runner(
-            [{"id": 7, "slice_name": "KPI · Заказы", "params": json.dumps(created)}]
+            [{"id": 7, "slice_name": "KPI · Заказы", "form_data": params}]
         )
         settled.sync_big_numbers([self._spec()])
 
@@ -158,6 +164,20 @@ class TestSyncBigNumbers:
         ids = runner.sync_big_numbers([self._spec()])
         assert runner.client.posts, "карточки не было — её надо создать"
         assert ids["KPI · Заказы"] == 999
+
+    def test_duplicate_outside_the_dashboard_is_not_recreated(self, capsys):
+        """Одноимённый чарт вне дашборда — повод остановиться.
+
+        Именно так карточки и задвоились: прогон не нашёл их на
+        дашборде и создал вторые, после чего правки уходили то в одну
+        копию, то в другую.
+        """
+        runner = self._runner([], elsewhere=[{"id": 99, "slice_name": "KPI · Заказы"}])
+
+        runner.sync_big_numbers([self._spec()])
+
+        assert runner.client.posts == [], "дубликат создавать нельзя"
+        assert "не на дашборде" in capsys.readouterr().out
 
 
 class TestFilterNamesAreStable:
