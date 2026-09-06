@@ -261,17 +261,33 @@ def persist_write_and_count(
         invalid_df.unpersist()
 
 
+DUPLICATE_LOOKBACK_DAYS = 365
+
+
 def read_historical_keys(
     spark,
     clean_root: Path,
     entity: str,
     id_column: str,
     load_date: str,
+    lookback_days: int = DUPLICATE_LOOKBACK_DAYS,
 ):
-    """Возвращает ID из clean-слоя всех загрузок, кроме текущей.
+    """Возвращает ID из clean-слоя за последние `lookback_days` дней.
 
-    Это позволяет находить дубликаты относительно прошлых загрузок и
+    Нужно, чтобы находить дубликаты относительно прошлых загрузок и
     безопасно перезапускать transform для той же даты.
+
+    Окно, а не вся история: прежняя версия отбирала партиции условием
+    `load_date != текущая`, под которое Spark не умеет отсекать
+    партиции, — и читала весь clean-слой целиком на каждой ночной
+    загрузке. На пятидесяти днях это незаметно, на трёх годах каждая
+    ночь становится дороже предыдущей.
+
+    Цена компромисса названа прямо: повторно выданный ID, чей оригинал
+    старше окна, проверкой не поймается. Год выбран как заведомо
+    достаточный срок для переиспользования идентификатора в учётной
+    системе; в самом хранилище такие строки всё равно схлопнет
+    ReplacingMergeTree по ключу.
     """
 
     entity_root = clean_root / entity
@@ -280,9 +296,13 @@ def read_historical_keys(
         return None
 
     current_date = F.lit(load_date).cast("date")
+    earliest = F.date_sub(current_date, lookback_days)
 
     return (
         spark.read.parquet(str(entity_root))
+        # Нижняя граница стоит первой и намеренно: именно она даёт
+        # отсечение партиций, ради которого всё и затевалось.
+        .filter(F.col("load_date") >= earliest)
         .filter(F.col("load_date") != current_date)
         .select(id_column)
         .where(F.col(id_column).isNotNull())
