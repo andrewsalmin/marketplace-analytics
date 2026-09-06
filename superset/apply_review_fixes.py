@@ -1294,21 +1294,27 @@ class Runner:
 
     # --- новые чарты ---------------------------------------------------
 
-    def create_big_numbers(self, specs: list[dict[str, Any]]) -> dict[str, int]:
-        existing = {c["slice_name"]: c["id"] for c in self._all_charts()}
-        created: dict[str, int] = {}
+    def sync_big_numbers(self, specs: list[dict[str, Any]]) -> dict[str, int]:
+        """Создаёт KPI-карточки и приводит существующие к описанию.
+
+        Прежняя версия умела только создавать: если карточка уже была,
+        она пропускалась целиком. Поэтому изменившийся горизонт, формат
+        или подпись до неё не доезжали, а прогон бодро рапортовал «0
+        изменений» — правки были в коде и не были на дашборде.
+        """
+        existing = {c["slice_name"]: c for c in self._all_charts()}
+        ids: dict[str, int] = {}
+
         for spec in specs:
-            if spec["name"] in existing:
-                created[spec["name"]] = existing[spec["name"]]
-                continue
             dataset = self.datasets.get(spec["dataset"])
             if not dataset:
                 print(f"  ! витрина {spec['dataset']} не найдена — пропуск KPI")
                 continue
+
             filters: list[Any] = []
             for expression, subject in spec["filters"]:
                 filters = ensure_filter(filters, expression, subject)
-            form_data = {
+            wanted = {
                 "viz_type": "big_number_total",
                 "datasource": f"{dataset['id']}__table",
                 "metric": spec["metric"],
@@ -1316,25 +1322,58 @@ class Runner:
                 "subheader": spec["subheader"],
                 "adhoc_filters": filters,
             }
-            self.log(f"P2-02 новый чарт «{spec['name']}»")
+
+            chart = existing.get(spec["name"])
+            if chart is None:
+                self.log(f"новый чарт «{spec['name']}»")
+                if self.apply:
+                    result = self.client.post(
+                        "/api/v1/chart/",
+                        {
+                            "slice_name": spec["name"],
+                            "viz_type": "big_number_total",
+                            "datasource_id": dataset["id"],
+                            "datasource_type": "table",
+                            "params": json.dumps(wanted, ensure_ascii=False),
+                            "dashboards": [self.dashboard_id],
+                        },
+                    )
+                    ids[spec["name"]] = result["id"]
+                continue
+
+            ids[spec["name"]] = chart["id"]
+            form_data = copy.deepcopy(chart.get("form_data") or {})
+            before = json.dumps(form_data, sort_keys=True, ensure_ascii=False)
+            form_data.update(wanted)
+            if json.dumps(form_data, sort_keys=True, ensure_ascii=False) == before:
+                continue
+
+            self.log(f"карточка «{spec['name']}» приведена к описанию")
             if self.apply:
-                result = self.client.post(
-                    "/api/v1/chart/",
+                self.client.put(
+                    f"/api/v1/chart/{chart['id']}",
                     {
-                        "slice_name": spec["name"],
-                        "viz_type": "big_number_total",
+                        "params": json.dumps(form_data, ensure_ascii=False),
+                        "query_context": "",
                         "datasource_id": dataset["id"],
                         "datasource_type": "table",
-                        "params": json.dumps(form_data, ensure_ascii=False),
-                        "dashboards": [self.dashboard_id],
                     },
                 )
-                created[spec["name"]] = result["id"]
-        return created
+        return ids
 
     def _all_charts(self) -> list[dict[str, Any]]:
-        query = json.dumps({"columns": ["id", "slice_name"], "page_size": 100})
-        return self.client.get(f"/api/v1/chart/?q={query}")["result"]
+        # form_data нужен, чтобы сравнить текущее состояние карточки с
+        # описанием и не переписывать её на каждом прогоне.
+        query = json.dumps(
+            {"columns": ["id", "slice_name", "params"], "page_size": 100}
+        )
+        rows = self.client.get(f"/api/v1/chart/?q={query}")["result"]
+        for row in rows:
+            try:
+                row["form_data"] = json.loads(row.get("params") or "{}")
+            except ValueError:
+                row["form_data"] = {}
+        return rows
 
     # --- дашборд -------------------------------------------------------
 
@@ -1650,8 +1689,8 @@ def main() -> int:
 
     kpi_ids: dict[str, int] = {}
     if "p2" in phases:
-        print("\nНовые чарты:")
-        kpi_ids = runner.create_big_numbers(KPI_CHARTS + DQ_CHARTS)
+        print("\nKPI-карточки:")
+        kpi_ids = runner.sync_big_numbers(KPI_CHARTS + DQ_CHARTS)
 
     print("\nДашборд:")
     runner.patch_dashboard(phases, kpi_ids)

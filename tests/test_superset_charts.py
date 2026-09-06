@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -81,3 +82,79 @@ class TestRenameChainIsComplete:
                 assert alias != patch.get("slice_name"), (
                     f"«{name}»: алиас совпадает с текущим именем"
                 )
+
+
+class TestSyncBigNumbers:
+    """KPI-карточки должны не только создаваться, но и обновляться."""
+
+    class _Client:
+        def __init__(self, charts):
+            self.charts = charts
+            self.puts = []
+            self.posts = []
+
+        def get(self, path):
+            return {"result": self.charts}
+
+        def put(self, path, payload):
+            self.puts.append((path, payload))
+            return {}
+
+        def post(self, path, payload):
+            self.posts.append((path, payload))
+            return {"id": 999}
+
+    def _runner(self, charts, apply=True):
+        runner = arf.Runner.__new__(arf.Runner)
+        runner.client = self._Client(charts)
+        runner.apply = apply
+        runner.planned = []
+        runner.datasets = {"orders": {"id": 15}}
+        runner.dashboard_id = 1
+        return runner
+
+    def _spec(self, **over):
+        spec = {
+            "name": "KPI · Заказы",
+            "dataset": "orders",
+            "metric": arf.metric("Заказов", "count()"),
+            "format": "SMART_NUMBER",
+            "subheader": "Создано заказов",
+            "filters": [],
+        }
+        spec.update(over)
+        return spec
+
+    def test_existing_card_is_brought_in_line(self):
+        """Изменился горизонт или подпись — карточка обязана обновиться."""
+        stale = {
+            "id": 7,
+            "slice_name": "KPI · Заказы",
+            "params": '{"subheader": "устаревшая подпись"}',
+        }
+        runner = self._runner([stale])
+
+        runner.sync_big_numbers([self._spec()])
+
+        assert runner.client.puts, "существующая карточка не обновилась"
+        written = json.loads(runner.client.puts[0][1]["params"])
+        assert written["subheader"] == "Создано заказов"
+
+    def test_card_matching_the_spec_is_left_alone(self):
+        runner = self._runner([])
+        runner.sync_big_numbers([self._spec()])
+        created = json.loads(runner.client.posts[0][1]["params"])
+
+        settled = self._runner(
+            [{"id": 7, "slice_name": "KPI · Заказы", "params": json.dumps(created)}]
+        )
+        settled.sync_big_numbers([self._spec()])
+
+        assert settled.client.puts == [], "идемпотентность: повтор не пишет"
+        assert settled.planned == []
+
+    def test_missing_card_is_created(self):
+        runner = self._runner([])
+        ids = runner.sync_big_numbers([self._spec()])
+        assert runner.client.posts, "карточки не было — её надо создать"
+        assert ids["KPI · Заказы"] == 999
