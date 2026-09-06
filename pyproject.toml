@@ -21,11 +21,11 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-# packages = [] обязателен: при плоской раскладке setuptools сам ищет
-# пакеты и спотыкается о dags/, data/ и superset/ — «Multiple top-level
-# packages discovered». Одного py-modules недостаточно, автопоиск он не
-# отключает.
-packages = []
+# Список пакетов задан явно: при плоской раскладке setuptools ищет их
+# сам и спотыкается о dags/ и data/ — «Multiple top-level packages
+# discovered». Явное перечисление заодно выключает автопоиск, чего
+# одного py-modules недостаточно.
+packages = ["superset"]
 py-modules = [
     "generate_data",
     "growth",
@@ -48,11 +48,6 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-
-[tool.ruff.lint.per-file-ignores]
-# pytest.importorskip("pyspark") обязан отработать до импортов pyspark,
-# поэтому импорты в этом файле не могут стоять в самом верху.
-"tests/test_transform_dq.py" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

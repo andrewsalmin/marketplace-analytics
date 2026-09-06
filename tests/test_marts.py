@@ -334,3 +334,39 @@ def test_no_module_exits_the_process_at_import_time():
         "модуль завершает процесс при импорте, вместо того чтобы бросить "
         "исключение: " + ", ".join(offenders)
     )
+
+
+def test_no_module_is_loaded_by_file_path():
+    """Модули импортируются по имени, а не подгружаются по пути к файлу.
+
+    spec_from_file_location — та же болезнь, что и правка sys.path:
+    вызывающий обязан знать, где физически лежит файл, и раскладка
+    каталогов становится частью контракта. Два теста Superset грузили
+    так apply_review_fixes.py, пока superset/ не стал пакетом.
+
+    Цена была не только в опрятности. Такая загрузка идёт в обход
+    обычной машинерии импорта, и модуль, убивавший процесс при загрузке,
+    слишком долго выглядел рабочим — до первого прогона на чистой
+    машине.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        if "venv" in path.parts or ".git" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                name = func.attr
+            else:
+                name = getattr(func, "id", "")
+            if name == "spec_from_file_location":
+                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+
+    assert not offenders, "модуль грузится по пути к файлу: " + ", ".join(offenders)

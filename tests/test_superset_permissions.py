@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
 import pytest
@@ -25,12 +24,7 @@ import pytest
 # окружении Spark на сервере.
 pytest.importorskip("requests", reason="нужен requirements-superset.txt")
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location(
-    "apply_review_fixes", REPO_ROOT / "superset" / "apply_review_fixes.py"
-)
-arf = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(arf)
+from superset import apply_review_fixes as arf
 
 
 class FakeClient:
