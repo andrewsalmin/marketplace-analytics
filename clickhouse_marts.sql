@@ -221,9 +221,14 @@ CREATE OR REPLACE VIEW marketplace_marts.orders_by_hour_dow AS
 WITH
     (SELECT toDate(min(created_at)) FROM marketplace_marts.orders) AS first_day,
     (SELECT toDate(max(created_at)) FROM marketplace_marts.orders) AS last_day,
+    -- assumeNotNull обязателен: скалярный подзапрос в ClickHouse имеет
+    -- тип Nullable (источник мог оказаться пустым), а numbers() требует
+    -- обычное целое и отвергает Nullable(UInt64).
     calendar AS (
-        SELECT first_day + number AS day
-        FROM numbers(toUInt64(dateDiff('day', first_day, last_day) + 1))
+        SELECT assumeNotNull(first_day) + number AS day
+        FROM numbers(
+            toUInt64(assumeNotNull(dateDiff('day', first_day, last_day)) + 1)
+        )
     ),
     days_per_dow AS (
         SELECT CASE toDayOfWeek(day)
