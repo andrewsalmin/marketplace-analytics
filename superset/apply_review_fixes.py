@@ -1430,6 +1430,11 @@ def main() -> int:
     )
     parser.add_argument("--dashboard", type=int, default=1, help="id дашборда")
     parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="показать, что API отдаёт по датасетам, и выйти",
+    )
+    parser.add_argument(
         "--public-role",
         default="Public",
         help="роль, которой выдать доступ к витринам (пусто — не трогать)",
@@ -1472,6 +1477,9 @@ def main() -> int:
 
     client = Superset(args.url, args.username, password)
 
+    if args.diagnose:
+        return diagnose(client)
+
     if args.apply:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         backup = client.export_dashboard(
@@ -1505,6 +1513,56 @@ def main() -> int:
     print(f"\nИтого изменений: {len(runner.planned)}")
     if not args.apply and runner.planned:
         print("Повтори с --apply, чтобы записать.")
+    return 0
+
+
+def diagnose(client: Superset) -> int:
+    """Показывает, что API отдаёт по датасетам и кто мы для Superset.
+
+    Нужен, когда интерфейс показывает одно, а скрипт видит другое:
+    разницу между `count` и длиной `result` невозможно объяснить, не
+    увидев обе цифры.
+    """
+    try:
+        me = client.get("/api/v1/me/")["result"]
+        print(f"Пользователь: {me.get('username')} ({me.get('email')})")
+    except SupersetError as exc:
+        print(f"Пользователь: не удалось узнать — {exc}")
+
+    variants = {
+        "как в скрипте": json.dumps(
+            {
+                "columns": ["id", "table_name", "sql", "schema", "kind"],
+                "page_size": 100,
+            }
+        ),
+        "только page_size": json.dumps({"page_size": 100}),
+        "без q": None,
+    }
+    for label, query in variants.items():
+        path = "/api/v1/dataset/" + (f"?q={query}" if query else "")
+        try:
+            payload = client.get(path)
+        except SupersetError as exc:
+            print(f"  {label:18} ошибка: {exc}")
+            continue
+        rows = payload.get("result") or []
+        print(
+            f"  {label:18} count={payload.get('count')} "
+            f"строк в ответе={len(rows)}"
+        )
+
+    print("\nПостранично, без выбора колонок:")
+    seen: list[str] = []
+    for page in range(20):
+        query = json.dumps({"page_size": 100, "page": page})
+        rows = client.get(f"/api/v1/dataset/?q={query}").get("result") or []
+        if not rows:
+            break
+        seen.extend(f"{r.get('schema')}.{r.get('table_name')}" for r in rows)
+    print(f"  всего собрано: {len(seen)}")
+    for name in sorted(seen):
+        print(f"    {name}")
     return 0
 
 
