@@ -185,15 +185,9 @@ def test_final_is_used_on_every_replacing_merge_tree_read(marts_sql):
 
 
 def _evaluate():
-    import importlib.util
-    from pathlib import Path
+    import marts_checks
 
-    spec = importlib.util.spec_from_file_location(
-        "marts_data", Path(__file__).resolve().parent / "test_marts_data.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.evaluate
+    return marts_checks.evaluate
 
 
 def test_check_passes_on_one():

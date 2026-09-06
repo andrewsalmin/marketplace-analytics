@@ -263,11 +263,19 @@ def daily_marketplace_pipeline():
             env={"CLICKHOUSE_PASSWORD": password},
         )
 
+    # retries=0: проверка детерминирована, повтор даст тот же ответ и
+    # только оттянет разбор. Падение означает расхождение витрин с
+    # данными, а не сетевую икоту.
+    @task(retries=0, execution_timeout=timedelta(minutes=15))
+    def verify() -> None:
+        _run([PYTHON_BIN, "marts_checks.py"])
+
     (
         generate(ds="{{ ds }}")
         >> ingest(ds="{{ ds }}")
         >> transform(ds="{{ ds }}")
         >> load(ds="{{ ds }}")
+        >> verify()
     )
 
 
