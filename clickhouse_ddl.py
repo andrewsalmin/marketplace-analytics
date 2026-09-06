@@ -20,6 +20,7 @@ import base64
 import json
 import logging
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -143,6 +144,23 @@ def ensure_marts(args) -> None:
     logger.info("[MARTS] %d objects in marketplace_marts are up to date.", count)
 
 
+def _password_from_client_config() -> str:
+    """Пароль из ~/.clickhouse-client/config.xml, если он там есть.
+
+    Тот же файл читает сам clickhouse-client, поэтому там, где ручные
+    запросы уже работают, модуль заводится без переменных окружения — и
+    пароль не приходится держать в окружении процесса.
+    """
+    path = Path.home() / ".clickhouse-client" / "config.xml"
+    if not path.exists():
+        return ""
+
+    match = re.search(
+        r"<password>(.*?)</password>", path.read_text(encoding="utf-8"), re.S
+    )
+    return match.group(1).strip() if match else ""
+
+
 def connection_from_config() -> SimpleNamespace:
     """Параметры подключения из clickhouse_config.json и окружения.
 
@@ -152,9 +170,12 @@ def connection_from_config() -> SimpleNamespace:
     config = json.loads(
         (REPO_ROOT / "clickhouse_config.json").read_text(encoding="utf-8")
     )
-    password = os.environ.get("CLICKHOUSE_PASSWORD", "")
+    password = os.environ.get("CLICKHOUSE_PASSWORD") or _password_from_client_config()
     if not password:
-        raise SystemExit("Задай CLICKHOUSE_PASSWORD.")
+        raise SystemExit(
+            "Пароль не найден: задай CLICKHOUSE_PASSWORD либо положи его в "
+            "~/.clickhouse-client/config.xml."
+        )
 
     return SimpleNamespace(
         clickhouse_host=config.get("host", "localhost"),
