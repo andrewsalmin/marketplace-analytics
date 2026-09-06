@@ -232,6 +232,29 @@ CHECKS: dict[str, tuple[str, str]] = {
         INNER JOIN {MARTS}.orders AS o ON o.order_id = p.order_id
         """,
     ),
+    "тепловая карта: ни один заказ не потерян": (
+        "витрина предагрегирована по дню недели, часу, городу и каналу; "
+        "лишнее измерение в группировке размножило бы заказы, "
+        "недостающее — потеряло",
+        f"""
+        SELECT (SELECT sum(orders) FROM {MARTS}.orders_by_hour_dow)
+                   = (SELECT count() FROM {MARTS}.orders),
+               toString((SELECT sum(orders) FROM {MARTS}.orders_by_hour_dow))
+                   || ' vs ' || toString((SELECT count() FROM {MARTS}.orders))
+        """,
+    ),
+    "retention: зрелые ячейки образуют полную сетку": (
+        "с INNER JOIN зрелая неделя без активности исчезала вместо нуля; "
+        "сетка обязана содержать все смещения от нуля до максимума",
+        f"""
+        SELECT countIf(retention_rate > 1) = 0
+               AND min(weeks_since_signup) = 0,
+               'смещения с ' || toString(min(weeks_since_signup)) || ' по '
+                   || toString(max(weeks_since_signup)) || ', вне [0..1]: '
+                   || toString(countIf(retention_rate > 1))
+        FROM {MARTS}.customer_cohort_retention
+        """,
+    ),
     "SLA: зрелые заказы закрыты": (
         "заказ старше горизонта обязан быть в конечном статусе — "
         "доставлен, отменён или возмещён. Незакрытых сейчас около 4%: "
