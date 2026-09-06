@@ -125,25 +125,49 @@ class Superset:
         self._login(username, password)
 
     def _login(self, username: str, password: str) -> None:
+        """Вход сессионной кукой, как это делает веб-интерфейс.
+
+        Не JWT, хотя у Superset есть /api/v1/security/login и он проще.
+        При входе по токену список датасетов приходит урезанным: под
+        одной и той же учёткой /api/v1/dataset/ отдаёт 6 записей по
+        токену и 20 по куке. Роли из токена разворачиваются не полностью,
+        проверка all_datasource_access не срабатывает, и остаются только
+        датасеты с явно выданным доступом. Скрипт из-за этого считал
+        переехавшие витрины несуществующими и шёл создавать дубликаты.
+        """
+        page = self.session.get(f"{self.base}/login/", timeout=30)
+        if page.status_code != 200:
+            raise SupersetError(
+                f"Не открылась форма входа: HTTP {page.status_code}"
+            )
+        token = re.search('name="csrf_token"[^>]*value="([^"]+)"', page.text)
+
         resp = self.session.post(
-            f"{self.base}/api/v1/security/login",
-            json={
+            f"{self.base}/login/",
+            data={
                 "username": username,
                 "password": password,
-                "provider": "db",
-                "refresh": True,
+                "csrf_token": token.group(1) if token else "",
             },
             timeout=30,
         )
-        if resp.status_code == 401:
+        if resp.status_code >= 400:
+            raise SupersetError(f"Логин не прошёл: HTTP {resp.status_code}")
+
+        # Форма отвечает 200 и на неверный пароль — она просто снова
+        # рисует себя. Единственный надёжный признак входа — что API
+        # начал отвечать от имени пользователя.
+        me = self.session.get(
+            f"{self.base}/api/v1/me/",
+            headers={"Accept": "application/json"},
+            timeout=30,
+        )
+        if me.status_code != 200:
             raise SupersetError(
                 f"Superset не принял пару «{username}» + пароль. Проверь её "
                 "в веб-интерфейсе: это должна быть учётка Superset, а не "
                 "сервера или базы."
             )
-        if resp.status_code != 200:
-            raise SupersetError(f"Логин не прошёл: {resp.status_code} {resp.text}")
-        self.session.headers["Authorization"] = f"Bearer {resp.json()['access_token']}"
 
         csrf = self.session.get(
             f"{self.base}/api/v1/security/csrf_token/", timeout=30
