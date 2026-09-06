@@ -25,6 +25,12 @@ jobs:
       - name: Install pinned dependencies
         run: pip install --require-hashes -r requirements-dev.lock
 
+      # Второй лок — ради тестов Superset: без requests они молча
+      # пропускались бы, и девять проверок выдачи прав не выполнялись
+      # нигде. Локи не пересекаются ни одним пакетом, ставятся подряд.
+      - name: Install the Superset client dependencies
+        run: pip install --require-hashes -r requirements-superset.lock
+
       # --no-deps: зависимости уже поставлены из lock-файла с
       # хешами, здесь нужен только сам проект — чтобы модули из
       # корня импортировались без правки sys.path.
@@ -34,9 +40,9 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
-      # Тесты DQ-правил здесь пропускаются: pyspark в этот job не ставится
-      # (см. job dq-rules), а tests/test_transform_dq.py начинается с
-      # pytest.importorskip("pyspark").
+      # Тесты DQ-правил и маркера загрузки здесь пропускаются: pyspark в
+      # этот job не ставится (см. job dq-rules), а оба модуля начинаются
+      # с pytest.importorskip.
       - name: Run tests
         run: pytest -v
 

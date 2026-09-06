@@ -60,8 +60,14 @@ from growth import maturity_days, payment_settlement_days
 
 try:
     import requests
-except ImportError:  # pragma: no cover - подсказка вместо трейсбека
-    sys.exit("Нужен requests: pip install requests")
+except ImportError as exc:  # pragma: no cover - подсказка вместо голого ImportError
+    # raise, а не sys.exit: SystemExit на уровне модуля убивает не
+    # скрипт, а того, кто его импортирует. Тесты грузят этот файл через
+    # importlib, и выход отсюда ронял весь прогон целиком — 178 тестов
+    # не запускались вовсе, с сообщением «no tests ran».
+    raise ImportError(
+        "Нужен requests: pip install -r requirements-superset.txt"
+    ) from exc
 
 
 # ---------------------------------------------------------------------------

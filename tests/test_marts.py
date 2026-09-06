@@ -266,3 +266,71 @@ def test_no_module_imports_by_patching_sys_path():
                 offenders.append(f"{path.relative_to(root)}:{node.lineno}")
 
     assert not offenders, "путь чинится руками: " + ", ".join(offenders)
+
+
+def test_no_module_exits_the_process_at_import_time():
+    """Ни один модуль не завершает процесс, пока его импортируют.
+
+    Так уже ломалось: superset/apply_review_fixes.py на отсутствующий
+    requests делал sys.exit прямо на уровне модуля. Тесты грузят его
+    через importlib, и SystemExit — не обычное исключение — валил не
+    один тест, а весь прогон: «no tests ran», ноль выполненных проверок
+    при зелёном линтере.
+
+    Импортируемый модуль обязан бросать исключение, которое вызывающий
+    может поймать. Выход из процесса — привилегия точки входа, поэтому
+    блок `if __name__ == "__main__"` из проверки исключён.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+
+    def is_main_guard(node):
+        if not isinstance(node, ast.If):
+            return False
+        test = node.test
+        return (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "__name__"
+        )
+
+    def exits_at_module_level(node):
+        """Обходит только то, что выполняется при импорте.
+
+        Внутрь функций и классов не заходит: там sys.exit законен —
+        именно так main() и сообщает об ошибке.
+        """
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if is_main_guard(child):
+                continue
+            if isinstance(child, ast.Call):
+                func = child.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "exit"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "sys"
+                ):
+                    yield child.lineno
+            if isinstance(child, ast.Raise) and isinstance(child.exc, ast.Call):
+                name = child.exc.func
+                if isinstance(name, ast.Name) and name.id == "SystemExit":
+                    yield child.lineno
+            yield from exits_at_module_level(child)
+
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        if "venv" in path.parts or ".git" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for lineno in exits_at_module_level(tree):
+            offenders.append(f"{path.relative_to(root)}:{lineno}")
+
+    assert not offenders, (
+        "модуль завершает процесс при импорте, вместо того чтобы бросить "
+        "исключение: " + ", ".join(offenders)
+    )

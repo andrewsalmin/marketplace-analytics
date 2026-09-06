@@ -12,6 +12,13 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
+# requests нужен самому скрипту, который тесты грузят ниже. Без пропуска
+# импорт падал бы на машине без requirements-superset.txt — например, в
+# окружении Spark на сервере.
+pytest.importorskip("requests", reason="нужен requirements-superset.txt")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
     "apply_review_fixes", REPO_ROOT / "superset" / "apply_review_fixes.py"
