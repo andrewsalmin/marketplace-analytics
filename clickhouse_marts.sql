@@ -206,6 +206,65 @@ FROM marketplace_marts.orders AS o
 LEFT JOIN marketplace_marts.customers AS c
        ON c.customer_id = o.customer_id;
 
+-- Среднее число заказов в час по дням недели.
+--
+-- Знаменатель — все календарные дни периода, а не только те, в которые
+-- заказы случились. Прежняя формула делила на COUNT(DISTINCT дата) в
+-- пределах ячейки: для Омска в понедельник в 00:00 это два заказа на
+-- двух датах, то есть «в среднем 1 заказ», хотя понедельников в периоде
+-- четырнадцать и честное среднее — 0,14. На редких срезах ошибка была
+-- кратной.
+--
+-- Календарь строится от границ данных, а не от now(): остановленный
+-- пайплайн иначе раздувал бы знаменатель пустыми сутками.
+CREATE OR REPLACE VIEW marketplace_marts.orders_by_hour_dow AS
+WITH
+    (SELECT toDate(min(created_at)) FROM marketplace_marts.orders) AS first_day,
+    (SELECT toDate(max(created_at)) FROM marketplace_marts.orders) AS last_day,
+    calendar AS (
+        SELECT first_day + number AS day
+        FROM numbers(toUInt64(dateDiff('day', first_day, last_day) + 1))
+    ),
+    days_per_dow AS (
+        SELECT CASE toDayOfWeek(day)
+            WHEN 1 THEN '1 · Пн'
+            WHEN 2 THEN '2 · Вт'
+            WHEN 3 THEN '3 · Ср'
+            WHEN 4 THEN '4 · Чт'
+            WHEN 5 THEN '5 · Пт'
+            WHEN 6 THEN '6 · Сб'
+            ELSE '7 · Вс'
+        END AS dow_label, count() AS days
+        FROM calendar
+        GROUP BY dow_label
+    ),
+    orders_per_cell AS (
+        SELECT
+            CASE toDayOfWeek(toDate(created_at))
+            WHEN 1 THEN '1 · Пн'
+            WHEN 2 THEN '2 · Вт'
+            WHEN 3 THEN '3 · Ср'
+            WHEN 4 THEN '4 · Чт'
+            WHEN 5 THEN '5 · Пт'
+            WHEN 6 THEN '6 · Сб'
+            ELSE '7 · Вс'
+        END AS dow_label,
+            toHour(created_at) AS hour_of_day,
+            count() AS orders
+        FROM marketplace_marts.orders
+        GROUP BY dow_label, hour_of_day
+    )
+SELECT
+    d.dow_label AS dow_label,
+    h.hour_of_day AS hour_of_day,
+    ifNull(o.orders, 0) AS orders,
+    d.days AS days,
+    ifNull(o.orders, 0) / d.days AS orders_per_day
+FROM days_per_dow AS d
+CROSS JOIN (SELECT arrayJoin(range(24)) AS hour_of_day) AS h
+LEFT JOIN orders_per_cell AS o
+       ON o.dow_label = d.dow_label AND o.hour_of_day = h.hour_of_day;
+
 -- Первый заказ покупателя и задержка до него.
 --
 -- nullIf(..., toDateTime(0)) обязателен: join_use_nulls в ClickHouse по
@@ -288,6 +347,62 @@ FROM (
 GROUP BY attempts
 ORDER BY attempts;
 
+-- Retention по когортам регистрации.
+--
+-- Сетка полная: каждая когорта × каждое смещение в неделях, а не только
+-- ячейки, где заказы случились. С INNER JOIN зрелая неделя без
+-- активности просто исчезала с карты, и «никто не вернулся» выглядело
+-- как «данных нет» — это разные утверждения, и путать их нельзя.
+--
+-- is_mature отделяет второе от первого: незрелая ячейка остаётся
+-- пустой, зрелая без активности показывает честный ноль.
+--
+-- Активность = заказ создан. Не оплачен и не доставлен: вопрос
+-- retention в том, вернулся ли покупатель, а не чем это кончилось.
+CREATE OR REPLACE VIEW marketplace_marts.customer_cohort_retention AS
+WITH
+    (SELECT max(created_at) FROM marketplace_marts.orders) AS last_observed_at,
+    cohorts AS (
+        SELECT customer_id, toStartOfWeek(registration_date, 1) AS cohort_week
+        FROM marketplace_marts.customers
+    ),
+    cohort_sizes AS (
+        SELECT cohort_week, count() AS cohort_size
+        FROM cohorts
+        GROUP BY cohort_week
+    ),
+    activity AS (
+        SELECT
+            c.cohort_week AS cohort_week,
+            dateDiff('week', c.cohort_week, toStartOfWeek(o.created_at, 1))
+                AS weeks_since_signup,
+            uniqExact(o.customer_id) AS active_customers
+        FROM cohorts AS c
+        INNER JOIN marketplace_marts.orders AS o
+                ON o.customer_id = c.customer_id
+        GROUP BY cohort_week, weeks_since_signup
+    ),
+    offsets AS (
+        SELECT arrayJoin(range(toUInt32(
+            (SELECT max(weeks_since_signup) FROM activity) + 1
+        ))) AS weeks_since_signup
+    )
+SELECT
+    formatDateTime(s.cohort_week, '%m-%d') AS cohort_week,
+    s.cohort_week AS cohort_week_date,
+    o.weeks_since_signup AS weeks_since_signup,
+    s.cohort_size AS cohort_size,
+    ifNull(a.active_customers, 0) AS active_customers,
+    ifNull(a.active_customers, 0) / s.cohort_size AS retention_rate,
+    toDateTime(addWeeks(s.cohort_week, o.weeks_since_signup + 1))
+        <= last_observed_at AS is_mature
+FROM cohort_sizes AS s
+CROSS JOIN offsets AS o
+LEFT JOIN activity AS a
+       ON a.cohort_week = s.cohort_week
+      AND a.weeks_since_signup = o.weeks_since_signup
+WHERE o.weeks_since_signup >= 0;
+
 -- Сырые длительности обработки рефанда, а не дневные средние: перцентиль
 -- по средним — это не перцентиль по заказам.
 CREATE OR REPLACE VIEW marketplace_marts.refund_processing_times AS
@@ -367,15 +482,19 @@ SELECT load_date, 'Платежи', count()
 FROM marketplace_analytics.quarantine_payments
 GROUP BY load_date;
 
--- Свежесть пайплайна. _load_commits пишется только после того, как все
--- таблицы за load_date догружены целиком, поэтому это честный ответ на
--- «данные за какой день доступны», а не «какие файлы вроде на месте».
+-- Свежесть пайплайна по каждой сущности отдельно.
+--
+-- _load_commits пишется только после того, как таблица за load_date
+-- догружена целиком, поэтому это честный ответ на «данные за какой день
+-- доступны», а не «какие файлы вроде на месте».
+--
+-- По сущностям, а не одной строкой на всё: одна отставшая таблица при
+-- общем максимуме выглядела бы свежей, и заказы за вчера тихо
+-- сопоставлялись бы с позавчерашними платежами.
 CREATE OR REPLACE VIEW marketplace_marts.load_freshness AS
 SELECT
+    entity,
     max(load_date) AS last_load_date,
-    dateDiff('hour', max(loaded_at), now()) AS hours_since_load,
-    count() AS entities_loaded
+    dateDiff('hour', max(loaded_at), now()) AS hours_since_load
 FROM marketplace_analytics._load_commits
-WHERE load_date = (
-    SELECT max(load_date) FROM marketplace_analytics._load_commits
-);
+GROUP BY entity;

@@ -481,6 +481,14 @@ DATASETS: dict[str, dict[str, str]] = {
         "phase": "p0",
         "note": "1.5 попытки оплаты вместе с возмещёнными",
     },
+    "orders_by_hour_dow": {
+        "phase": "p1",
+        "note": "4.1 календарный знаменатель тепловой карты",
+    },
+    "customer_cohort_retention": {
+        "phase": "p1",
+        "note": "4.2 retention с полной сеткой и нулями",
+    },
 }
 
 
@@ -652,9 +660,15 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Разбивка DQ-ошибок по типам": {
             "phase": "p0",
-            "note": "P0-07 сортировка по числу строк в карантине",
+            "note": "P0-07 сортировка + 4.3 подпись про срабатывания",
+            "slice_name": "Срабатывания DQ-проверок по типам",
+            "description": (
+                "Считаются срабатывания проверок, а не строки: одна строка "
+                "карантина может нарушать несколько правил сразу, поэтому "
+                "сумма по типам больше числа строк в карантине."
+            ),
             "set": {
-                "y_axis_title": "Строк в карантине",
+                "y_axis_title": "Срабатываний проверки",
                 **sort_by_first_metric("Строк в карантине"),
             },
         },
@@ -819,27 +833,49 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Количество заказов по часам и дням недели": {
             "phase": "p1",
-            "dataset": "orders_with_customer_dim",
-            "note": "P1-09 понедельник сверху",
-            "set": {"sort_y_axis": "alpha_desc", "sort_x_axis": "alpha_asc"},
+            "dataset": "orders_by_hour_dow",
+            "note": "4.1 календарный знаменатель + P1-09 понедельник сверху",
+            "description": (
+                "Среднее число заказов в час. Знаменатель — все дни периода, "
+                "включая те, когда в этот час заказов не было: иначе редкая "
+                "ячейка показывает среднее по паре удачных дней."
+            ),
+            "set": {
+                "metric": metric("Заказов в час (в среднем)", "avg(orders_per_day)"),
+                "groupby": "dow_label",
+                "x_axis": "hour_of_day",
+                "y_axis_format": ",.2f",
+                "sort_y_axis": "alpha_desc",
+                "sort_x_axis": "alpha_asc",
+                "time_grain_sqla": None,
+            },
+            "replace_filters": [],
         },
         "Retention по когортам регистрации (по неделям)": {
             "phase": "p1",
+            "dataset": "customer_cohort_retention",
             "note": "P1-10 короткие подписи когорт + отсечение недели −1",
             "description": (
-                "Доля когорты, сделавшая заказ через N недель после "
-                "регистрации. Только зрелые ячейки (is_mature)."
+                "Доля когорты, сделавшая хотя бы один заказ на N-й неделе "
+                "после регистрации. Ноль означает, что не вернулся никто; "
+                "пустая ячейка — что неделя ещё не прожита до конца. "
+                "Активность считается по созданному заказу."
             ),
             "set": {
-                "groupby": {
+                "metric": metric("Retention", "avg(retention_rate)"),
+                "groupby": "cohort_week",
+                "x_axis": {
                     "expressionType": "SQL",
-                    "label": "Когорта (неделя регистрации)",
-                    "sqlExpression": "formatDateTime(cohort_week, '%m-%d')",
+                    "label": "Недель с регистрации",
+                    "sqlExpression": "leftPad(toString(weeks_since_signup), 2, '0')",
                 },
                 "y_axis_format": ".0%",
                 "sort_y_axis": "alpha_desc",
+                "sort_x_axis": "alpha_asc",
+                "time_grain_sqla": None,
             },
-            "filters": [("weeks_since_signup >= 0", "weeks_since_signup")],
+            "replace_filters": [],
+            "filters": [("is_mature = 1", "is_mature")],
         },
         "Изменение числа заказов": {
             "phase": "p1",
@@ -976,7 +1012,8 @@ DQ_CHARTS: list[dict[str, Any]] = [
         "dataset": "load_freshness",
         "metric": metric("Часов с последней загрузки", "max(hours_since_load)"),
         "format": ",.0f",
-        "subheader": "По маркеру _load_commits",
+        # max, а не min: отстала одна сущность — отстали данные целиком.
+        "subheader": "По самой отставшей сущности",
         "filters": [],
     },
 ]

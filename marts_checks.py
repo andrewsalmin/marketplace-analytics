@@ -232,6 +232,21 @@ CHECKS: dict[str, tuple[str, str]] = {
         INNER JOIN {MARTS}.orders AS o ON o.order_id = p.order_id
         """,
     ),
+    "SLA: зрелые заказы закрыты": (
+        "заказ старше горизонта обязан быть в конечном статусе — "
+        "доставлен, отменён или возмещён. Незакрытых сейчас около 4%: "
+        "известный пробел state machine генератора, который переживает "
+        "истечение всех дедлайнов. Порог в 5% держит от ухудшения, но "
+        "задачу не закрывает — нужна правка advance_open_orders и "
+        "перегенерация",
+        f"""
+        SELECT countIf(status NOT IN ('delivered', 'cancelled', 'refunded'))
+                   / count() < 0.05,
+               toString(countIf(status NOT IN ('delivered', 'cancelled', 'refunded')))
+                   || ' из ' || toString(count()) || ' зрелых не закрыты'
+        FROM {MARTS}.orders WHERE is_mature
+        """,
+    ),
     "качество: причины разложены на атомарные": (
         "составная причина «A | B» — это две ошибки, а не третья "
         "категория; arrayJoin обязан их разделить",
