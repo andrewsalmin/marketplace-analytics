@@ -165,6 +165,59 @@ class TestSyncBigNumbers:
         assert runner.client.posts, "карточки не было — её надо создать"
         assert ids["KPI · Заказы"] == 999
 
+    def test_card_under_the_old_name_is_renamed_not_duplicated(self):
+        """Переименование обязано находить карточку по прежнему имени.
+
+        Иначе это не переименование, а размножение: скрипт не найдёт
+        «Заказы», решит, что карточки нет, и создаст вторую рядом со
+        старой. Так карточки уже задваивались однажды, и правки после
+        этого уходили то в одну копию, то в другую.
+        """
+        old = {"id": 7, "slice_name": "KPI · Заказы", "form_data": {}}
+        runner = self._runner([old])
+
+        ids = runner.sync_big_numbers(
+            [self._spec(name="Заказы", aliases=["KPI · Заказы"])]
+        )
+
+        assert runner.client.posts == [], "новую карточку создавать нельзя"
+        assert ids["Заказы"] == 7, "должна использоваться прежняя карточка"
+        path, payload = runner.client.puts[0]
+        assert path == "/api/v1/chart/7"
+        assert payload["slice_name"] == "Заказы"
+
+    def test_renaming_stops_once_the_new_name_is_in_place(self):
+        """Второй прогон не должен переписывать уже переименованное."""
+        created = self._runner([])
+        spec = self._spec(name="Заказы", aliases=["KPI · Заказы"])
+        created.sync_big_numbers([spec])
+        params = json.loads(created.client.posts[0][1]["params"])
+
+        settled = self._runner(
+            [{"id": 7, "slice_name": "Заказы", "form_data": params}]
+        )
+        settled.sync_big_numbers([spec])
+
+        assert settled.client.puts == [], "идемпотентность: повтор не пишет"
+        assert settled.planned == []
+
+    def test_currency_is_written_only_where_asked(self):
+        """Пустая валюта — не то же самое, что её отсутствие.
+
+        Superset, увидев ключ currency_format, рисует суффикс; с пустым
+        значением это пустой суффикс и лишний отступ у числа.
+        """
+        plain = self._runner([])
+        plain.sync_big_numbers([self._spec()])
+        assert "currency_format" not in json.loads(plain.client.posts[0][1]["params"])
+
+        money = self._runner([])
+        money.sync_big_numbers(
+            [self._spec(currency={"symbol": "RUB", "symbolPosition": "suffix"})]
+        )
+        written = json.loads(money.client.posts[0][1]["params"])
+        assert written["currency_format"]["symbol"] == "RUB"
+
     def test_duplicate_outside_the_dashboard_is_not_recreated(self, capsys):
         """Одноимённый чарт вне дашборда — повод остановиться.
 
@@ -178,6 +231,29 @@ class TestSyncBigNumbers:
 
         assert runner.client.posts == [], "дубликат создавать нельзя"
         assert "не на дашборде" in capsys.readouterr().out
+
+
+class TestSlugsAreUnique:
+    """Идентификаторы из русских имён обязаны различаться.
+
+    Правило оставляет только [a-z0-9], а в кириллице таких символов нет:
+    слаг выходил пустым, и разные имена получали один идентификатор. На
+    дашборде это выглядело так, что две карточки вкладки «Качество
+    данных» встали под одним ключом раскладки и вторая затёрла первую.
+    """
+
+    def test_cyrillic_names_do_not_collide(self):
+        a = arf._slug("Часов с последней загрузки")
+        b = arf._slug("Невалидных строк")
+        assert a and b, "слаг не может быть пустым"
+        assert a != b
+
+    def test_same_name_gives_the_same_slug(self):
+        """Иначе сверка с описанием видит различие на каждом прогоне."""
+        assert arf._slug("Невалидных строк") == arf._slug("Невалидных строк")
+
+    def test_latin_names_stay_readable(self):
+        assert arf._slug("Payment success rate") == "payment_success_rate"
 
 
 class TestFilterNamesAreStable:

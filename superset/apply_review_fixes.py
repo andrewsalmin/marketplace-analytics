@@ -377,7 +377,23 @@ class Superset:
 
 
 def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")[:40]
+    """Короткий стабильный идентификатор из произвольной строки.
+
+    Запасной хвост из хеша нужен из-за кириллицы: правило оставляет
+    только [a-z0-9], а в «Заказы» таких символов нет вовсе, и слаг
+    выходил пустым. Совпадали при этом не строки, а идентификаторы —
+    у всех русскоязычных метрик optionName был один и тот же «metric_»,
+    а две карточки на вкладке качества данных получили общий ключ в
+    раскладке, и вторая затёрла первую.
+
+    Хеш берётся от исходного текста, поэтому одно и то же имя даёт
+    один и тот же слаг между запусками: иначе сверка «совпадает с
+    описанием» видела бы различие каждый раз.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")[:40]
+    if slug:
+        return slug
+    return "x" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
 
 
 def metric(label: str, expression: str) -> dict[str, Any]:
@@ -1017,20 +1033,69 @@ def chart_patches() -> dict[str, dict[str, Any]]:
 
 
 # P2-02. KPI-строка на Overview: числа, которых на вкладке не было вообще.
+# Форматы чисел на карточках. Раньше их было четыре штуки на пять
+# карточек — SMART_NUMBER, ",.0f", ".1%", ".2%", — и рядом стояли «230M»
+# и «2,021» без намёка на то, что это рубли.
+#
+# Правило простое и одно на весь дашборд: то, что считают поштучно,
+# показывается целиком; то, что не прочитать по цифрам, сокращается;
+# доли — всегда с одним знаком. Разнобой в знаках после запятой создаёт
+# ложное впечатление, будто одна доля измерена точнее другой.
+COUNT_FORMAT = ",.0f"  # 133 741 — заказы считают штуками
+LARGE_MONEY_FORMAT = ".3s"  # 230M — рубли до копейки тут не читают
+MONEY_FORMAT = ",.0f"  # 2 021 — средний чек читают целиком
+SHARE_FORMAT = ".1%"  # 16.2% — один знак у всех долей
+
+# Валюта задаётся отдельным полем, а не дописывается в подпись: так её
+# ставит сам Superset, рядом с числом и по ту же сторону у всех карточек.
+#
+# Код RUB, а не знак ₽: символ Superset берёт не отсюда, а из локали
+# фронтенда, и на английской локали (единственной в этом инстансе)
+# отдаёт «RUB». Попытка передать сюда «₽» напрямую приводит к тому, что
+# валюта пропадает совсем — код неизвестен Intl, и суффикс молча
+# опускается. Знак рубля требует включения русской локали в конфиге
+# Superset, то есть перезапуска сервиса.
+RUBLES = {"symbol": "RUB", "symbolPosition": "suffix"}
+
+# Размеры карточек. Ширина — в колонках двенадцатиколоночной сетки,
+# высота — в единицах по 8 px.
+#
+# Было 2 колонки на карточку при пяти карточках в ряд: 149 px на экране
+# 1280 px, где заголовок обрезался у всех пяти, а из 240 px высоты
+# содержимое занимало 155. Четыре карточки по три колонки дают ровно
+# двенадцать и вдвое больше места под заголовок.
+KPI_CARD_WIDTH = 3
+KPI_CARD_HEIGHT = 20
+# Карточки качества данных чуть просторнее: их имена длиннее («Отставание
+# данных» против «GMV»), и на трёх колонках заголовок переносился на
+# вторую строку, вытесняя подпись за нижний край. Шесть колонок при этом
+# уже перебор — Superset подгоняет кегль под размер карточки, и подпись
+# вырастала почти до размера самого числа.
+DQ_CARD_WIDTH = 4
+DQ_CARD_HEIGHT = 22
+
 KPI_CHARTS: list[dict[str, Any]] = [
     {
-        "name": "KPI · GMV",
+        # Префикс «KPI ·» съедал треть заголовка и не сообщал ничего:
+        # карточки и так стоят строкой в самом верху обзора. На 1280 px
+        # из-за него все пять имён обрезались до «KPI ·…».
+        "name": "GMV",
+        "aliases": ["KPI · GMV"],
         "dataset": "orders_with_customer_dim",
         "metric": metric("GMV, ₽", GMV_PAID),
-        "format": "SMART_NUMBER",
+        "format": LARGE_MONEY_FORMAT,
+        "currency": RUBLES,
         "subheader": "Оплаченные заказы за период",
         "filters": [SETTLED_FILTER],
     },
     {
-        "name": "KPI · Заказы",
+        "name": "Заказы",
+        "aliases": ["KPI · Заказы"],
         "dataset": "orders_with_customer_dim",
         "metric": metric("Заказов", "count()"),
-        "format": "SMART_NUMBER",
+        # Не SMART_NUMBER: тот показывал «134k» вместо 133 741. Заказы
+        # пересчитывают и сверяют с выгрузкой, округление тут мешает.
+        "format": COUNT_FORMAT,
         "subheader": "Создано заказов",
         # Без горизонта: заказ создан, его судьба на счётчик не влияет.
         # С MATURE карточка показывала 76 тысяч там, где график рядом
@@ -1038,42 +1103,56 @@ KPI_CHARTS: list[dict[str, Any]] = [
         "filters": [],
     },
     {
-        "name": "KPI · Средний чек",
+        "name": "Средний чек",
+        "aliases": ["KPI · Средний чек"],
         "dataset": "orders_with_customer_dim",
         "metric": metric("Средний чек, ₽", AOV_PAID),
-        "format": ",.0f",
+        "format": MONEY_FORMAT,
+        "currency": RUBLES,
         "subheader": "На оплаченный заказ",
         "filters": [SETTLED_FILTER],
     },
     {
-        "name": "KPI · Доля отмен",
+        "name": "Доля отмен",
+        "aliases": ["KPI · Доля отмен"],
         "dataset": "orders_with_customer_dim",
         "metric": metric("Доля отмен", "countIf(cancelled_at IS NOT NULL) / count()"),
-        "format": ".1%",
+        "format": SHARE_FORMAT,
         "subheader": f"От созданных заказов старше {MATURITY_DAYS} дней",
         "filters": [MATURE_FILTER],
-    },
-    {
-        "name": "KPI · Невалидных строк",
-        "dataset": "dq_metrics",
-        "metric": metric(
-            "Доля невалидных строк", "SUM(invalid_rows) / SUM(total_rows)"
-        ),
-        "format": ".2%",
-        "subheader": "Доля строк в карантине",
-        "filters": [],
     },
 ]
 
 # P2-04. Свежесть пайплайна на вкладке качества данных.
+#
+# Доля невалидных строк переехала сюда из строки KPI. Причина не только
+# в ширине: обзор отвечает на вопрос «как идут дела у бизнеса», а доля
+# строк в карантине — свойство пайплайна, и её место рядом с отставанием
+# загрузки, на вкладке качества данных.
 DQ_CHARTS: list[dict[str, Any]] = [
     {
-        "name": "Часов с последней загрузки",
+        # Имя — заголовок карточки, а не предложение: «Часов с последней
+        # загрузки» не помещается в 231 px и обрезается многоточием на
+        # второй строке. Единица измерения ушла в подпись, где для неё
+        # есть место.
+        "name": "Отставание данных",
+        "aliases": ["Часов с последней загрузки"],
         "dataset": "load_freshness",
         "metric": metric("Часов с последней загрузки", "max(hours_since_load)"),
-        "format": ",.0f",
+        "format": COUNT_FORMAT,
         # max, а не min: отстала одна сущность — отстали данные целиком.
-        "subheader": "По самой отставшей сущности",
+        "subheader": "Часов по самой отставшей сущности",
+        "filters": [],
+    },
+    {
+        "name": "Невалидных строк",
+        "aliases": ["KPI · Невалидных строк"],
+        "dataset": "dq_metrics",
+        "metric": metric(
+            "Доля невалидных строк", "SUM(invalid_rows) / SUM(total_rows)"
+        ),
+        "format": SHARE_FORMAT,
+        "subheader": "Доля строк в карантине",
         "filters": [],
     },
 ]
@@ -1429,8 +1508,12 @@ class Runner:
                 "subheader": spec["subheader"],
                 "adhoc_filters": filters,
             }
+            # Ключ пишется только для денег: пустое значение Superset
+            # трактует как «валюта задана» и рисует пустой суффикс.
+            if spec.get("currency"):
+                wanted["currency_format"] = spec["currency"]
 
-            chart = existing.get(spec["name"])
+            chart, was_named = self._named_or_renamed(existing, spec)
             if chart is None:
                 if spec["name"] in elsewhere:
                     # Чарт с таким именем есть, но не на дашборде.
@@ -1461,21 +1544,53 @@ class Runner:
             form_data = copy.deepcopy(chart.get("form_data") or {})
             before = json.dumps(form_data, sort_keys=True, ensure_ascii=False)
             form_data.update(wanted)
-            if json.dumps(form_data, sort_keys=True, ensure_ascii=False) == before:
+            after = json.dumps(form_data, sort_keys=True, ensure_ascii=False)
+            changed = after != before
+
+            if not changed and was_named:
                 continue
 
-            self.log(f"карточка «{spec['name']}» приведена к описанию")
-            if self.apply:
-                self.client.put(
-                    f"/api/v1/chart/{chart['id']}",
-                    {
-                        "params": json.dumps(form_data, ensure_ascii=False),
-                        "query_context": "",
-                        "datasource_id": dataset["id"],
-                        "datasource_type": "table",
-                    },
+            payload: dict[str, Any] = {
+                "params": json.dumps(form_data, ensure_ascii=False),
+                "query_context": "",
+                "datasource_id": dataset["id"],
+                "datasource_type": "table",
+            }
+            if not was_named:
+                self.log(
+                    f"карточка «{chart['slice_name']}» переименована "
+                    f"в «{spec['name']}»"
                 )
+                payload["slice_name"] = spec["name"]
+            if changed:
+                self.log(f"карточка «{spec['name']}» приведена к описанию")
+
+            if self.apply:
+                self.client.put(f"/api/v1/chart/{chart['id']}", payload)
         return ids
+
+    @staticmethod
+    def _named_or_renamed(
+        existing: dict[str, dict[str, Any]], spec: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Ищет карточку по текущему имени, затем по прежним.
+
+        Без поиска по прежним именам переименование карточки означало бы
+        не переименование, а создание второй: скрипт не нашёл бы «GMV»,
+        решил, что её нет, и завёл новую рядом с «KPI · GMV». Ровно так
+        карточки уже задваивались однажды.
+
+        Возвращает вторым значением признак «нашлась под нынешним
+        именем» — иначе вызывающий обязан ещё и переименовать её.
+        """
+        chart = existing.get(spec["name"])
+        if chart is not None:
+            return chart, True
+        for alias in spec.get("aliases", []):
+            chart = existing.get(alias)
+            if chart is not None:
+                return chart, False
+        return None, True
 
     def _all_charts(self) -> list[dict[str, Any]]:
         # form_data нужен, чтобы сравнить текущее состояние карточки с
@@ -1635,35 +1750,106 @@ class Runner:
         metadata["native_filter_configuration"] = filters
 
     def _kpi_row(self, position: dict[str, Any], kpi_ids: dict[str, int]) -> None:
-        ids = [kpi_ids.get(spec["name"]) for spec in KPI_CHARTS]
-        if not all(ids) or "ROW-ov-kpi" in position:
-            return
-        self._insert_row(
+        self._sync_row(
             position,
             tab_id="TAB-overview",
             row_id="ROW-ov-kpi",
             at_index=0,
             charts=[
-                (f"CHART-kpi-{index}", spec["name"], chart_id, 2, 30)
-                for index, (spec, chart_id) in enumerate(
-                    zip(KPI_CHARTS, ids, strict=True)
+                (
+                    f"CHART-kpi-{index}",
+                    spec["name"],
+                    kpi_ids.get(spec["name"]),
+                    KPI_CARD_WIDTH,
+                    KPI_CARD_HEIGHT,
                 )
+                for index, spec in enumerate(KPI_CHARTS)
             ],
         )
 
     def _dq_row(self, position: dict[str, Any], kpi_ids: dict[str, int]) -> None:
-        chart_id = kpi_ids.get("Часов с последней загрузки")
-        if not chart_id or "ROW-dq-freshness" in position:
-            return
-        self._insert_row(
+        self._sync_row(
             position,
             tab_id="TAB-dq",
             row_id="ROW-dq-freshness",
             at_index=0,
             charts=[
-                ("CHART-dq-freshness", "Часов с последней загрузки", chart_id, 4, 30)
+                (
+                    f"CHART-dq-{_slug(spec['name'])}",
+                    spec["name"],
+                    kpi_ids.get(spec["name"]),
+                    DQ_CARD_WIDTH,
+                    DQ_CARD_HEIGHT,
+                )
+                for spec in DQ_CHARTS
             ],
         )
+
+    def _sync_row(
+        self,
+        position: dict[str, Any],
+        tab_id: str,
+        row_id: str,
+        at_index: int,
+        charts: list[tuple[str, str, int | None, int, int]],
+    ) -> None:
+        """Приводит строку карточек к описанию: состав, размеры, подписи.
+
+        Прежняя версия умела только создавать строку и выходила, если та
+        уже есть, — та же болезнь, что была у самих карточек: изменившая-
+        ся ширина оставалась в коде и не доезжала до дашборда. Из-за
+        этого пять карточек так и стояли по две колонки из двенадцати,
+        то есть по 149 px на 1280 px экрана, где заголовок обрезался у
+        всех до единого.
+
+        Карточка, пропавшая из описания, удаляется из раскладки, но не
+        из Superset: она может понадобиться на другой вкладке, а
+        удаление чарта необратимо.
+        """
+        if any(chart_id is None for _, _, chart_id, _, _ in charts):
+            # Хотя бы одну карточку не нашли и не создали. Перекладывать
+            # строку по неполному списку — значит выкинуть из неё живую
+            # карточку из-за чужой ошибки.
+            return
+
+        if row_id not in position:
+            self._insert_row(position, tab_id, row_id, at_index, charts)
+            return
+
+        row = position[row_id]
+        expected = [key for key, *_ in charts]
+
+        for key in list(position):
+            node = position.get(key)
+            if (
+                isinstance(node, dict)
+                and node.get("type") == "CHART"
+                and row_id in node.get("parents", [])
+                and key not in expected
+            ):
+                del position[key]
+
+        for key, name, chart_id, width, height in charts:
+            node = position.get(key)
+            if node is None:
+                node = position[key] = {
+                    "type": "CHART",
+                    "id": key,
+                    "children": [],
+                    "parents": [*row["parents"], row_id],
+                    "meta": {},
+                }
+            node["parents"] = [*row["parents"], row_id]
+            meta = node["meta"]
+            meta.update({"chartId": chart_id, "width": width, "height": height})
+            # sliceNameOverride, если он задан, показывается вместо
+            # sliceName — переименование без него видно только в списке
+            # чартов, но не на дашборде.
+            meta["sliceName"] = name
+            if "sliceNameOverride" in meta:
+                meta["sliceNameOverride"] = name
+
+        row["children"] = expected
 
     @staticmethod
     def _insert_row(
