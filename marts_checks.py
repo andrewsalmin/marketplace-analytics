@@ -54,8 +54,14 @@ def query_via_client(sql: str) -> str:
     if done.returncode != 0:
         # Не CalledProcessError: её текст сообщает только код выхода, а
         # разбираться приходится по тому, что сказал ClickHouse.
-        lines = (done.stderr or "").strip().splitlines()
-        raise RuntimeError(lines[-1] if lines else f"код выхода {done.returncode}")
+        # ClickHouse печатает эхо запроса последней строкой, а само
+        # сообщение выше — берём строку с кодом ошибки, если она есть.
+        lines = [ln.strip() for ln in (done.stderr or "").splitlines() if ln.strip()]
+        detail = next(
+            (ln for ln in lines if "Code:" in ln or "Exception" in ln),
+            lines[0] if lines else f"код выхода {done.returncode}",
+        )
+        raise RuntimeError(detail)
     return done.stdout
 
 
