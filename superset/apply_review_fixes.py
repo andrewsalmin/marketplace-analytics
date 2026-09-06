@@ -1478,7 +1478,7 @@ def main() -> int:
     client = Superset(args.url, args.username, password)
 
     if args.diagnose:
-        return diagnose(client)
+        return diagnose(client, args.username, password)
 
     if args.apply:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1516,7 +1516,7 @@ def main() -> int:
     return 0
 
 
-def diagnose(client: Superset) -> int:
+def diagnose(client: Superset, username: str, password: str) -> int:
     """Показывает, что API отдаёт по датасетам и кто мы для Superset.
 
     Нужен, когда интерфейс показывает одно, а скрипт видит другое:
@@ -1547,16 +1547,23 @@ def diagnose(client: Superset) -> int:
         print(f"Роли: не удалось прочитать — {exc}")
 
     try:
-        wide = [
-            row
-            for row in client.get(
+        wide, page, total = [], 0, 0
+        while page < 100:
+            rows = client.get(
                 "/api/v1/security/permissions-resources/?q="
-                + json.dumps({"page_size": 100})
+                + json.dumps({"page_size": 100, "page": page})
             )["result"]
-            if (row.get("permission") or {}).get("name")
-            in {"all_datasource_access", "all_database_access"}
-        ]
-        print(f"Объекты широкого доступа: {[r['id'] for r in wide]}")
+            if not rows:
+                break
+            total += len(rows)
+            wide += [
+                row
+                for row in rows
+                if (row.get("permission") or {}).get("name")
+                in {"all_datasource_access", "all_database_access"}
+            ]
+            page += 1
+        print(f"Разрешений всего: {total}, широкого доступа: {len(wide)}")
     except SupersetError as exc:
         print(f"Широкий доступ: не удалось прочитать — {exc}")
 
@@ -1582,6 +1589,40 @@ def diagnose(client: Superset) -> int:
             f"  {label:18} count={payload.get('count')} "
             f"строк в ответе={len(rows)}"
         )
+
+    # Интерфейс ходит с сессионной кукой, скрипт — с JWT-токеном. Если
+    # ответы различаются, дело не в правах роли, а в способе входа.
+    try:
+        fresh = requests.Session()
+        page_html = fresh.get(client.base + "/login/", timeout=30).text
+        token = re.search(
+            'name="csrf_token"[^>]*value="([^"]+)"', page_html
+        )
+        fresh.post(
+            client.base + "/login/",
+            data={
+                "username": username,
+                "password": password,
+                "csrf_token": token.group(1) if token else "",
+            },
+            timeout=30,
+        )
+        by_cookie = fresh.get(
+            client.base + "/api/v1/dataset/",
+            headers={"Accept": "application/json"},
+            timeout=30,
+        )
+        if by_cookie.status_code == 200:
+            body = by_cookie.json()
+            print(
+                "Тот же запрос с сессионной кукой: "
+                f"count={body.get('count')} "
+                f"строк={len(body.get('result') or [])}"
+            )
+        else:
+            print(f"Сессионный вход не удался: HTTP {by_cookie.status_code}")
+    except Exception as exc:  # noqa: BLE001 - диагностика не должна падать
+        print(f"Сравнение с кукой не получилось: {exc}")
 
     print("\nПостранично, без выбора колонок:")
     seen: list[str] = []
