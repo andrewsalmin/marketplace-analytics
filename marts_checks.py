@@ -255,19 +255,24 @@ CHECKS: dict[str, tuple[str, str]] = {
         FROM {MARTS}.customer_cohort_retention
         """,
     ),
-    "SLA: зрелые заказы закрыты": (
-        "заказ старше горизонта обязан быть в конечном статусе — "
-        "доставлен, отменён или возмещён. Незакрытых сейчас около 4%: "
-        "известный пробел state machine генератора, который переживает "
-        "истечение всех дедлайнов. Порог в 5% держит от ухудшения, но "
-        "задачу не закрывает — нужна правка advance_open_orders и "
-        "перегенерация",
+    "SLA: незакрытые зрелые заказы объяснены карантином": (
+        "заказ старше горизонта обязан быть в конечном статусе. "
+        "Исключение одно и оно законное: закрывающая строка несла "
+        "внедрённый DQ-дефект, transform.py её отбраковал, и в "
+        "хранилище осталась последняя валидная версия — открытая. "
+        "Незакрытый заказ БЕЗ строки в карантине означал бы настоящую "
+        "дыру в state machine генератора",
         f"""
-        SELECT countIf(status NOT IN ('delivered', 'cancelled', 'refunded'))
-                   / count() < 0.05,
-               toString(countIf(status NOT IN ('delivered', 'cancelled', 'refunded')))
-                   || ' из ' || toString(count()) || ' зрелых не закрыты'
-        FROM {MARTS}.orders WHERE is_mature
+        SELECT countIf(q.order_id = '') = 0,
+               toString(countIf(q.order_id = '')) || ' без объяснения из '
+                   || toString(count()) || ' незакрытых'
+        FROM (
+            SELECT order_id FROM {MARTS}.orders
+            WHERE is_mature AND status NOT IN ('delivered', 'cancelled', 'refunded')
+        ) AS o
+        LEFT JOIN (
+            SELECT DISTINCT order_id FROM marketplace_analytics.quarantine_orders
+        ) AS q ON q.order_id = o.order_id
         """,
     ),
     "качество: причины разложены на атомарные": (
