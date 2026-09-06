@@ -96,11 +96,17 @@ OBSOLETE_FILTERS = [
 
 # Права, без которых анонимный посетитель не может пользоваться
 # дашбордом, хотя данные ему уже видны. Диалог периода превращает
-# «Last week» в конкретные даты запросом к TimeRangeRestApi; без доступа
-# туда он получает 401, кнопка APPLY гаснет, и выбрать период нельзя
-# вообще. Право узкое: эндпоинт только разбирает выражение дат и никаких
-# данных не отдаёт.
-PUBLIC_EXTRA_PERMISSIONS = [("can_read", "TimeRangeRestApi")]
+# «Last week» в конкретные даты запросом к /api/v1/time_range/; без
+# доступа туда он получает 401, кнопка APPLY гаснет, и выбрать период
+# нельзя вообще.
+#
+# Ресурс называется Api, а не TimeRangeRestApi: несколько мелких
+# эндпоинтов Superset зарегистрированы под общим именем. Проверять такие
+# пары нужно выгрузкой прав (--diagnose), а не догадкой по имени класса.
+# Право узкое — эндпоинт разбирает выражение дат и данных не отдаёт;
+# соседние can_query и can_query_form_data на том же ресурсе анониму
+# сознательно не выдаются.
+PUBLIC_EXTRA_PERMISSIONS = [("can_time_range", "Api")]
 
 MATURE_FILTER = ("is_mature = 1", "is_mature")
 
@@ -250,7 +256,13 @@ class Superset:
         return rows
 
     def named_permissions(self, wanted: list[tuple[str, str]]) -> dict[str, int]:
-        """Разрешения по паре (право, ресурс): «ресурс» -> id."""
+        """Разрешения по паре (право, ресурс): «право on ресурс» -> id.
+
+        Ключ — пара целиком, а не ресурс: на одном ресурсе Api висят и
+        can_time_range, и can_query, и can_query_form_data, и путать их
+        нельзя — выдать лишнее анониму означает открыть ему выполнение
+        запросов.
+        """
         targets = {pair: None for pair in wanted}
         for row in self._permission_rows():
             key = (
@@ -259,7 +271,11 @@ class Superset:
             )
             if key in targets:
                 targets[key] = row["id"]
-        return {view: pid for (_, view), pid in targets.items() if pid is not None}
+        return {
+            f"{permission} on {view}": pid
+            for (permission, view), pid in targets.items()
+            if pid is not None
+        }
 
     def datasource_permissions(self) -> dict[int, int]:
         """Разрешения datasource_access: id датасета -> id разрешения.
@@ -1071,7 +1087,7 @@ class Runner:
         ).items():
             needed[view] = pid
         for permission, view in PUBLIC_EXTRA_PERMISSIONS:
-            if view not in needed:
+            if f"{permission} on {view}" not in needed:
                 absent.append(f"{permission} on {view}")
 
         missing = {name: pid for name, pid in needed.items() if pid not in current}

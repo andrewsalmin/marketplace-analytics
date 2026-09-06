@@ -36,7 +36,9 @@ class FakeClient:
         self.role_permissions = set(role_permissions or [])
         # Именованные права вроде can_read на TimeRangeRestApi. По
         # умолчанию есть — их отсутствие проверяется отдельным тестом.
-        self.named = {"TimeRangeRestApi": 900} if named is None else dict(named)
+        self.named = (
+            {"can_time_range on Api": 900} if named is None else dict(named)
+        )
         self.written: list[set[int]] = []
 
     def role_by_name(self, name):
@@ -243,4 +245,4 @@ class TestExtraPublicPermissions:
 
         make_runner(client, datasets).grant_public_access("Public")
 
-        assert "TimeRangeRestApi" in capsys.readouterr().out
+        assert "can_time_range on Api" in capsys.readouterr().out
