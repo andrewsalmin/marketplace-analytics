@@ -905,6 +905,24 @@ class Runner:
 
         Идемпотентно: датасет, уже смотрящий на витрину, пропускается.
         """
+        expected = {n for n, sp in DATASETS.items() if sp["phase"] in phases}
+        unseen = expected - set(self.datasets)
+        if unseen and len(unseen) == len(expected):
+            # Ни одного ожидаемого датасета не видно. Создавать их с нуля
+            # опаснее, чем остановиться: скорее всего дело в правах или в
+            # том, что список пришёл урезанным, а не в пустом инстансе.
+            raise SupersetError(
+                f"Не видно ни одного из {len(expected)} ожидаемых датасетов. "
+                f"Всего видно {len(self.datasets)}: "
+                f"{', '.join(sorted(self.datasets)) or '—'}. "
+                "Создание новых остановлено, чтобы не наплодить дубликаты."
+            )
+        if unseen:
+            print(
+                f"  ! не найдено датасетов: {', '.join(sorted(unseen))} "
+                f"(видно всего {len(self.datasets)})"
+            )
+
         for name, spec in DATASETS.items():
             if spec["phase"] not in phases:
                 continue
@@ -951,10 +969,23 @@ class Runner:
         self.datasets = self.client.datasets()
 
     def _database_id(self) -> int:
-        orders = self.datasets.get("orders")
-        if not orders:
-            raise SupersetError("Не найдена витрина orders — не от чего оттолкнуться")
-        detail = self.client.get(f"/api/v1/dataset/{orders['id']}")["result"]
+        """Id базы Superset, в которой заводить новые датасеты.
+
+        Берётся у любого существующего датасета: нужен именно id базы, а
+        не конкретная витрина. Прежняя версия требовала датасет с именем
+        `orders` и падала, если тот почему-то не виден, — хотя рядом
+        лежал десяток других с той же базой.
+        """
+        source = self.datasets.get("orders") or next(
+            iter(sorted(self.datasets.values(), key=lambda d: d["id"])), None
+        )
+        if source is None:
+            raise SupersetError(
+                "В Superset не видно ни одного датасета, поэтому неизвестно, "
+                "в какой базе заводить новые. Проверь права учётной записи "
+                "и что база подключена."
+            )
+        detail = self.client.get(f"/api/v1/dataset/{source['id']}")["result"]
         return detail["database"]["id"]
 
     def grant_public_access(self, role_name: str) -> None:
