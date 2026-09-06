@@ -221,3 +221,48 @@ def test_failure_message_explains_why_it_matters():
 
     with _pytest.raises(AssertionError, match="дедупликация сломалась"):
         _evaluate()("проверка", "дедупликация сломалась", "0\tдеталь")
+
+
+# ---------------------------------------------------------------------
+# Раскладка проекта
+# ---------------------------------------------------------------------
+
+
+def test_no_module_imports_by_patching_sys_path():
+    """Путь к модулям не чинится руками ни в одной точке входа.
+
+    Проект объявлен в pyproject.toml и ставится через `pip install -e .`.
+    Пока этого не было, каждая новая точка входа добавляла свою строку с
+    правкой пути — их накопилось две, и третья была вопросом времени.
+
+    Разбор кода, а не поиск по тексту: иначе тест ловит сам себя за
+    упоминание в комментарии.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    offenders = []
+    for path in root.rglob("*.py"):
+        if "venv" in path.parts or ".git" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr not in {
+                "insert",
+                "append",
+            }:
+                continue
+            target = func.value
+            if (
+                isinstance(target, ast.Attribute)
+                and target.attr == "path"
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "sys"
+            ):
+                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+
+    assert not offenders, "путь чинится руками: " + ", ".join(offenders)

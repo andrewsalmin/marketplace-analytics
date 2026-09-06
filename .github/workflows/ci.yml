@@ -25,6 +25,12 @@ jobs:
       - name: Install pinned dependencies
         run: pip install --require-hashes -r requirements-dev.lock
 
+      # --no-deps: зависимости уже поставлены из lock-файла с
+      # хешами, здесь нужен только сам проект — чтобы модули из
+      # корня импортировались без правки sys.path.
+      - name: Install the project
+        run: pip install -e . --no-deps
+
       - name: Lint (ruff)
         run: ruff check .
 
@@ -56,6 +62,12 @@ jobs:
 
       - name: Install pinned dependencies with Spark
         run: pip install --require-hashes -r requirements-spark.lock
+
+      # --no-deps: зависимости уже поставлены из lock-файла с
+      # хешами, здесь нужен только сам проект — чтобы модули из
+      # корня импортировались без правки sys.path.
+      - name: Install the project
+        run: pip install -e . --no-deps
 
       - name: Run DQ rule tests
         run: pytest tests/test_transform_dq.py -v

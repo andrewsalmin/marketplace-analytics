@@ -56,12 +56,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
-# Скрипт лежит в подкаталоге, а growth.py — в корне репозитория: проект
-# не устанавливается пакетом, поэтому корень добавляется в путь так же,
-# как это делает conftest.py для тестов.
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-
-from growth import maturity_days, payment_settlement_days  # noqa: E402
+from growth import maturity_days, payment_settlement_days
 
 try:
     import requests

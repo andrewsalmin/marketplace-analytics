@@ -1,9 +1,7 @@
-"""Делает модули из корня репозитория импортируемыми в тестах.
+"""Настройки pytest для проекта.
 
-Проект не устанавливается как пакет (`pip install -e .`), поэтому
-`import generate_data` из tests/ работает только через этот путь.
+Раньше здесь лежал sys.path.insert: проект не устанавливался, и
+`import generate_data` из tests/ иначе не работал. Теперь модули
+объявлены в pyproject.toml, а окружение ставится через
+`pip install -e .` — путь чинить не нужно ни здесь, ни в скриптах.
 """
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent))
