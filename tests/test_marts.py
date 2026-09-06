@@ -172,3 +172,50 @@ def test_final_is_used_on_every_replacing_merge_tree_read(marts_sql):
         assert all(match.strip() == "FINAL" for match in reads), (
             f"marketplace_analytics.{table} читается без FINAL"
         )
+
+
+# ---------------------------------------------------------------------
+# Разбор результата проверок на данных
+#
+# Сами проверки требуют ClickHouse и потому пропускаются в CI. Функция,
+# которая решает «прошло или нет», работает без него — и обязана быть
+# проверена, иначе набор из четырнадцати запросов молча зазеленеет
+# целиком при первой же ошибке в разборе.
+# ---------------------------------------------------------------------
+
+
+def _evaluate():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "marts_data", Path(__file__).resolve().parent / "test_marts_data.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.evaluate
+
+
+def test_check_passes_on_one():
+    _evaluate()("проверка", "почему", "1\tвсё сошлось")
+
+
+def test_check_fails_on_zero():
+    import pytest as _pytest
+
+    with _pytest.raises(AssertionError, match="разошлось"):
+        _evaluate()("проверка", "почему", "0\tразошлось")
+
+
+def test_check_fails_on_empty_answer():
+    import pytest as _pytest
+
+    with _pytest.raises(AssertionError, match="ничего не вернул"):
+        _evaluate()("проверка", "почему", "")
+
+
+def test_failure_message_explains_why_it_matters():
+    import pytest as _pytest
+
+    with _pytest.raises(AssertionError, match="дедупликация сломалась"):
+        _evaluate()("проверка", "дедупликация сломалась", "0\tдеталь")
