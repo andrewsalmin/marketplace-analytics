@@ -504,6 +504,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         # ---------------- P0 ----------------
         "Изменение GMV": {
             "phase": "p0",
+            "aliases": ["Динамика GMV"],
             "dataset": "orders_with_customer_dim",
             "note": "P0-02 GMV только по оплаченным + P0-03 зрелый хвост",
             "slice_name": "Динамика GMV (среднее за 7 дней)",
@@ -527,6 +528,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Изменение среднего чека (AOV)": {
             "phase": "p0",
+            "aliases": ["Динамика среднего чека (AOV)"],
             "dataset": "orders_with_customer_dim",
             "note": "P0-02 средний чек по оплаченным заказам",
             "slice_name": "Динамика среднего чека (среднее за 7 дней)",
@@ -841,6 +843,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Изменение числа заказов": {
             "phase": "p1",
+            "aliases": ["Динамика числа заказов"],
             "dataset": "orders_with_customer_dim",
             "note": "P1-01 формат оси + P1-07 сглаживание + P1-11 заголовок",
             "slice_name": "Динамика числа заказов (среднее за 7 дней)",
@@ -853,6 +856,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
         },
         "Изменение числа новых покупателей": {
             "phase": "p1",
+            "aliases": ["Динамика числа новых покупателей"],
             "note": "P1-01 формат оси + P1-07 сглаживание + P1-11 заголовок",
             "slice_name": "Динамика регистраций (среднее за 7 дней)",
             "description": (
@@ -1195,10 +1199,7 @@ class Runner:
         for name, patch in chart_patches().items():
             if patch["phase"] not in phases:
                 continue
-            # Искать надо и по новому имени: после первого прогона чарт
-            # называется уже так, как его переименовал сам скрипт, и по
-            # исходному ключу не находится.
-            chart = charts.get(name) or charts.get(patch.get("slice_name", ""))
+            chart = self._find_chart(charts, name, patch)
             if not chart:
                 print(f"  ! чарт «{name}» не найден — пропуск")
                 continue
@@ -1208,6 +1209,24 @@ class Runner:
             self.log(f"{patch['note']}: чарт «{name}»")
             if self.apply:
                 self.client.put(f"/api/v1/chart/{chart['id']}", payload)
+
+    @staticmethod
+    def _find_chart(
+        charts: dict[str, Any], name: str, patch: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Ищет чарт по всем именам, которые он у нас носил.
+
+        Ключ словаря — исходное имя, `slice_name` — то, как чарт
+        называется после правок, `aliases` — промежуточные варианты.
+        Без последнего каждое переименование делает чарт невидимым для
+        следующего прогона: на инстансе он уже под новым именем, а в
+        коде появилось ещё более новое. Так уже дважды пропускались
+        правки, причём молча.
+        """
+        for candidate in (name, patch.get("slice_name"), *patch.get("aliases", [])):
+            if candidate and candidate in charts:
+                return charts[candidate]
+        return None
 
     def _build_chart_payload(
         self, chart: dict[str, Any], patch: dict[str, Any]
@@ -1370,11 +1389,12 @@ class Runner:
         трогаются: заменяется лишь то, что дословно совпало со старым
         именем чарта.
         """
-        renamed = {
-            old: patch["slice_name"]
-            for old, patch in chart_patches().items()
-            if "slice_name" in patch
-        }
+        renamed = {}
+        for old, patch in chart_patches().items():
+            if "slice_name" not in patch:
+                continue
+            for previous in (old, *patch.get("aliases", [])):
+                renamed[previous] = patch["slice_name"]
         for node in position.values():
             if not isinstance(node, dict) or node.get("type") != "CHART":
                 continue
