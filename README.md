@@ -1,5 +1,7 @@
 # Marketplace Analytics
 
+[![CI](https://github.com/andrewsalmin/marketplace-analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/andrewsalmin/marketplace-analytics/actions/workflows/ci.yml)
+
 MVP аналитической платформы маркетплейса целиком: синтетический
 источник данных, DQ-пайплайн на Spark, витрины в ClickHouse,
 ежедневное расписание в Airflow и дашборд в Superset. Слои разбираются

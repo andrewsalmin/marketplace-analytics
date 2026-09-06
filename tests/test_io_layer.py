@@ -15,6 +15,7 @@ Spark нужен только маркеру загрузки — не пото�
 from __future__ import annotations
 
 import json
+import pathlib
 from datetime import date
 from types import SimpleNamespace
 
@@ -74,6 +75,94 @@ class TestPartitionContract:
         )
         partition = tmp_path / "orders" / "load_date=2026-06-01"
         assert [p.name for p in partition.iterdir()] == ["orders.parquet"]
+
+
+class TestInterruptedWrite:
+    """Обрыв записи: что остаётся на диске и что будет при повторе."""
+
+    def _crash_inside_to_parquet(self, monkeypatch):
+        def boom(self, *args, **kwargs):
+            raise OSError("диск кончился")
+
+        monkeypatch.setattr(pd.DataFrame, "to_parquet", boom)
+
+    def test_no_readable_partition_appears(self, tmp_path, monkeypatch):
+        """Главная гарантия: недописанного parquet не увидит никто.
+
+        Запись идёт во временное имя и только потом переименовывается,
+        поэтому файл под ожидаемым именем либо целый, либо его нет.
+        Иначе следующий шаг прочитал бы половину дня как весь день —
+        молча, без единой ошибки.
+        """
+        self._crash_inside_to_parquet(monkeypatch)
+
+        with pytest.raises(OSError):
+            ingest.write_raw_parquet(
+                pd.DataFrame({"order_id": ["ord_1"]}),
+                tmp_path,
+                "orders",
+                date(2026, 6, 1),
+            )
+
+        partition = tmp_path / "orders" / "load_date=2026-06-01"
+        assert not (partition / "orders.parquet").exists()
+
+    def test_leftover_temp_file_is_not_mistaken_for_data(
+        self, tmp_path, monkeypatch
+    ):
+        """Даже если обрыв оставил .tmp, читаемым файлом он не станет.
+
+        Имя начинается с точки и не совпадает с тем, что ищет чтение,
+        так что мусор виден человеку, но невидим пайплайну.
+        """
+        partition = tmp_path / "orders" / "load_date=2026-06-01"
+
+        def boom(self, path, *args, **kwargs):
+            pathlib.Path(path).write_bytes(b"PAR1-oborvano")
+            raise OSError("обрыв на середине")
+
+        monkeypatch.setattr(pd.DataFrame, "to_parquet", boom)
+
+        with pytest.raises(OSError):
+            ingest.write_raw_parquet(
+                pd.DataFrame({"order_id": ["ord_1"]}),
+                tmp_path,
+                "orders",
+                date(2026, 6, 1),
+            )
+
+        left = [p.name for p in partition.iterdir()]
+        assert left == [".orders.parquet.tmp"]
+        assert not (partition / "orders.parquet").exists()
+
+    def test_retry_is_refused_rather_than_half_written(
+        self, tmp_path, monkeypatch
+    ):
+        """Повтор после обрыва падает — и это выбранное поведение.
+
+        Каталог партиции остаётся после неудачи, и защита от перезаписи
+        видит его как чужой. Разбирать мёртвую партицию приходится
+        руками, зато невозможен худший исход: повтор, который дописал бы
+        данные в каталог с неизвестным содержимым и отчитался об успехе.
+        """
+        self._crash_inside_to_parquet(monkeypatch)
+        with pytest.raises(OSError):
+            ingest.write_raw_parquet(
+                pd.DataFrame({"order_id": ["ord_1"]}),
+                tmp_path,
+                "orders",
+                date(2026, 6, 1),
+            )
+
+        monkeypatch.undo()
+
+        with pytest.raises(FileExistsError, match="Перезапись запрещена"):
+            ingest.write_raw_parquet(
+                pd.DataFrame({"order_id": ["ord_1"]}),
+                tmp_path,
+                "orders",
+                date(2026, 6, 1),
+            )
 
 
 class TestIngestManifest:
