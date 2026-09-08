@@ -1155,6 +1155,10 @@ RETIRED_CARD_KEYS = ["currency_format"]
 # прокрутку внутри блока, чего на обзоре быть не должно.
 MARKDOWN_HEIGHT = 26
 
+# Доля высоты карточки под подпись. Значение из того же диапазона, что
+# Superset использует для остальных кеглей big_number.
+SUBHEADER_FONT_SIZE = 0.125
+
 KPI_CARD_WIDTH = 3
 KPI_CARD_HEIGHT = 20
 # Карточки качества данных чуть просторнее: их имена длиннее («Отставание
@@ -1229,8 +1233,8 @@ DQ_CHARTS: list[dict[str, Any]] = [
         "dataset": "load_freshness",
         "metric": metric("Часов с последней загрузки", "max(hours_since_load)"),
         "format": COUNT_FORMAT,
-        # max, а не min: отстала одна сущность — отстали данные целиком.
-        "subheader": "Часов по самой отставшей сущности",
+        # max, а не min: отстал один источник — отстали данные целиком.
+        "subheader": "Часов по самым отставшим данным",
         "filters": [],
     },
     {
@@ -1645,6 +1649,12 @@ class Runner:
                 "y_axis_format": spec["format"],
                 "subheader": spec["subheader"],
                 "adhoc_filters": filters,
+                # Кегль подписи задан явно. Без него Superset растягивает
+                # текст под ширину карточки, и в одном ряду «Создано
+                # заказов» выходило вдвое крупнее, чем «От созданных
+                # заказов старше 34 дней», — разный размер читается как
+                # разная важность, хотя это просто разная длина строки.
+                "subheader_font_size": SUBHEADER_FONT_SIZE,
             }
             chart, was_named = self._named_or_renamed(existing, spec)
             if chart is None:
