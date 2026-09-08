@@ -30,15 +30,39 @@ from superset import apply_review_fixes as arf
 class FakeClient:
     """Заглушка Superset: помнит права роли и записанные вызовы."""
 
-    def __init__(self, permissions=None, role_permissions=None, named=None):
+    def __init__(
+        self,
+        permissions=None,
+        role_permissions=None,
+        named=None,
+        chart_dataset_ids=None,
+    ):
         self.permissions = dict(permissions or {})
         self.role_permissions = set(role_permissions or [])
-        # Именованные права вроде can_read на TimeRangeRestApi. По
-        # умолчанию есть — их отсутствие проверяется отдельным тестом.
+        # Именованные права. По умолчанию есть все требуемые — их
+        # отсутствие проверяется отдельным тестом.
         self.named = (
-            {"can_time_range on Api": 900} if named is None else dict(named)
+            {
+                f"{perm} on {view}": 900 + i
+                for i, (perm, view) in enumerate(arf.PUBLIC_REQUIRED_PERMISSIONS)
+            }
+            if named is None
+            else dict(named)
+        )
+        # Набор прав считается по датасетам, которые читают чарты
+        # дашборда. По умолчанию — все, на какие заведены разрешения.
+        self.chart_dataset_ids = (
+            sorted(self.permissions)
+            if chart_dataset_ids is None
+            else list(chart_dataset_ids)
         )
         self.written: list[set[int]] = []
+
+    def charts(self, dashboard_id):
+        return {
+            f"чарт {i}": {"id": i, "form_data": {"datasource": f"{ds}__table"}}
+            for i, ds in enumerate(self.chart_dataset_ids)
+        }
 
     def role_by_name(self, name):
         return {"id": 7, "name": name} if name == "Public" else None
@@ -82,6 +106,7 @@ def make_runner(client, datasets=None, apply=True):
     runner.apply = apply
     runner.planned = []
     runner.datasets = datasets if datasets is not None else _all_datasets()
+    runner.dashboard_id = 1
     return runner
 
 
@@ -160,8 +185,8 @@ class TestGrantPublicAccess:
     def test_nothing_is_written_when_access_is_already_granted(self):
         datasets = _all_datasets()
         perms = _all_permissions(datasets)
-        already = set(perms.values()) | {900}
-        client = FakeClient(perms, role_permissions=already)
+        client = FakeClient(perms, role_permissions=set())
+        client.role_permissions = set(perms.values()) | set(client.named.values())
         runner = make_runner(client, datasets)
 
         runner.grant_public_access("Public")
@@ -200,27 +225,44 @@ class TestGrantPublicAccess:
             make_runner(client, datasets).grant_public_access("Public")
 
     def test_dataset_without_a_permission_object_is_reported(self, capsys):
-        """Права на датасет ещё не заведены — сказать, а не промолчать."""
+        """Чарт читает датасет, на который Superset не завёл разрешение.
+
+        Молчать нельзя: выдать доступ не получится, и посетитель увидит
+        пустой чарт без объяснений.
+        """
         datasets = _all_datasets()
         perms = _all_permissions(datasets)
-        perms.pop(datasets["customers"]["id"])
-        client = FakeClient(perms, role_permissions=set())
+        orphan = max(perms) + 1
+        client = FakeClient(
+            perms,
+            role_permissions=set(),
+            chart_dataset_ids=[*sorted(perms), orphan],
+        )
 
         make_runner(client, datasets).grant_public_access("Public")
 
         printed = capsys.readouterr().out
-        assert "customers" in printed
+        assert f"датасет {orphan}" in printed
         assert "нет объектов прав" in printed
 
-    def test_dataset_missing_entirely_is_reported(self, capsys):
-        """Датасета нет вовсе — повод сказать, а не упасть по KeyError."""
+    def test_unused_dataset_is_not_granted(self, capsys):
+        """Доступ выдаётся под чарты, а не под список датасетов в коде.
+
+        Иначе обычный прогон возвращал бы роли права, снятые сужением:
+        два расходящихся определения «нужного» вместо одного.
+        """
         datasets = _all_datasets()
-        datasets.pop("orders")
-        client = FakeClient(_all_permissions(datasets), role_permissions=set())
+        perms = _all_permissions(datasets)
+        used = sorted(perms)[:3]
+        client = FakeClient(perms, role_permissions=set(), chart_dataset_ids=used)
 
         make_runner(client, datasets).grant_public_access("Public")
 
-        assert "orders" in capsys.readouterr().out
+        written = client.written[0]
+        granted = {perms[ds] for ds in used}
+        unused = set(perms.values()) - granted
+        assert granted <= written
+        assert not (unused & written), "выдан доступ к тому, чего нет на дашборде"
 
 
 class TestExtraPublicPermissions:

@@ -97,31 +97,6 @@ OBSOLETE_FILTERS = [
     f"{MATURITY_DAYS} DAY FROM marketplace_analytics.orders FINAL)"
 ]
 
-# Права, без которых анонимный посетитель не может пользоваться
-# дашбордом, хотя данные ему уже видны. Диалог периода превращает
-# «Last week» в конкретные даты запросом к /api/v1/time_range/; без
-# доступа туда он получает 401, кнопка APPLY гаснет, и выбрать период
-# нельзя вообще.
-#
-# Ресурс называется Api, а не TimeRangeRestApi: несколько мелких
-# эндпоинтов Superset зарегистрированы под общим именем. Проверять такие
-# пары нужно выгрузкой прав (--diagnose), а не догадкой по имени класса.
-# Право узкое — эндпоинт разбирает выражение дат и данных не отдаёт;
-# соседние can_query и can_query_form_data на том же ресурсе анониму
-# сознательно не выдаются.
-# can_language_pack понадобилось, как только интерфейс перевели на
-# русский. Фронтенд запрашивает словарь переводов при загрузке страницы,
-# анонимный посетитель получал вместо JSON страницу логина, разбор падал
-# — и вместе с ним переставали рисоваться ВСЕ чарты. Запросы данных при
-# этом отвечали 200: дашборд выглядел пустым без единой ошибки на
-# экране, а причина нашлась только в консоли браузера.
-#
-# Эндпоинт отдаёт подписи интерфейса и никаких данных.
-PUBLIC_EXTRA_PERMISSIONS = [
-    ("can_time_range", "Api"),
-    ("can_language_pack", "Superset"),
-]
-
 # 6.6. Ровно то, что нужно анонимному посетителю, чтобы открыть дашборд
 # и пользоваться фильтрами. Список получен не из документации, а из
 # наблюдения: какие запросы делает браузер при загрузке дашборда под
@@ -136,10 +111,21 @@ PUBLIC_REQUIRED_PERMISSIONS = [
     ("can_read", "Dashboard"),
     # Данные чартов: POST /api/v1/chart/data.
     ("can_read", "Chart"),
-    # Диалог периода превращает «Last week» в даты: /api/v1/time_range/.
+    # Диалог периода превращает «Last week» в конкретные даты запросом
+    # к /api/v1/time_range/; без доступа туда он получает 401, кнопка
+    # APPLY гаснет, и период не выбрать вовсе.
+    #
+    # Ресурс называется Api, а не TimeRangeRestApi: несколько мелких
+    # эндпоинтов зарегистрированы под общим именем. Такие пары надо
+    # смотреть выгрузкой прав (--diagnose), а не угадывать по имени
+    # класса. Право узкое — разбирает выражение дат и данных не отдаёт;
+    # соседние can_query и can_query_form_data на том же ресурсе анониму
+    # сознательно не выдаются.
     ("can_time_range", "Api"),
     # Словарь переводов. Без него анонимный посетитель получает вместо
-    # JSON страницу логина, разбор падает, и не рисуется ни один чарт.
+    # JSON страницу логина, разбор падает, и не рисуется ни один чарт —
+    # при том, что запросы данных отвечают 200. Дашборд выглядит пустым
+    # без единой ошибки на экране; видно только в консоли браузера.
     ("can_language_pack", "Superset"),
 ]
 
@@ -1478,25 +1464,7 @@ class Runner:
             return
 
         current = self.client.role_permission_ids(role["id"])
-        available = self.client.datasource_permissions()
-
-        needed: dict[str, int] = {}
-        absent: list[str] = []
-        for name in DATASETS:
-            dataset = self.datasets.get(name)
-            perm_id = available.get(dataset["id"]) if dataset else None
-            if perm_id is None:
-                absent.append(name)
-            else:
-                needed[name] = perm_id
-        for view, pid in self.client.named_permissions(
-            PUBLIC_EXTRA_PERMISSIONS
-        ).items():
-            needed[view] = pid
-        for permission, view in PUBLIC_EXTRA_PERMISSIONS:
-            if f"{permission} on {view}" not in needed:
-                absent.append(f"{permission} on {view}")
-
+        needed, absent = self._public_targets()
         missing = {name: pid for name, pid in needed.items() if pid not in current}
 
         if absent:
@@ -1544,6 +1512,44 @@ class Runner:
         if still_missing:
             raise SupersetError("Права не записались: " + ", ".join(still_missing))
 
+    def _public_targets(self) -> tuple[dict[str, int], list[str]]:
+        """Права, которые нужны анонимному посетителю. Один источник.
+
+        Считается по чартам дашборда, а не по списку датасетов в коде:
+        доступ нужен ровно к тому, что чарты читают.
+
+        Общий для выдачи и для сужения намеренно. Раньше выдача брала
+        все датасеты подряд, а сужение — только используемые, и обычный
+        прогон бесшумно возвращал роли то, что сужение сняло: два
+        расходящихся определения «нужного» вместо одного.
+        """
+        available = self.client.datasource_permissions()
+        target: dict[str, int] = {}
+        absent: list[str] = []
+
+        used_ids = set()
+        for chart in self.client.charts(self.dashboard_id).values():
+            source = str(chart["form_data"].get("datasource") or "")
+            if source:
+                used_ids.add(int(source.split("__")[0]))
+
+        for dataset_id in sorted(used_ids):
+            perm_id = available.get(dataset_id)
+            if perm_id is None:
+                absent.append(f"датасет {dataset_id}")
+            else:
+                target[f"датасет {dataset_id}"] = perm_id
+
+        named = self.client.named_permissions(PUBLIC_REQUIRED_PERMISSIONS)
+        for permission, view in PUBLIC_REQUIRED_PERMISSIONS:
+            key = f"{permission} on {view}"
+            if key in named:
+                target[key] = named[key]
+            else:
+                absent.append(key)
+
+        return target, absent
+
     def narrow_public_access(self, role_name: str) -> None:
         """Оставляет роли ровно то, что нужно для просмотра дашборда.
 
@@ -1563,29 +1569,7 @@ class Runner:
             return
 
         current = self.client.role_permission_ids(role["id"])
-        available = self.client.datasource_permissions()
-
-        used_ids = set()
-        for chart in self.client.charts(self.dashboard_id).values():
-            source = str(chart["form_data"].get("datasource") or "")
-            if source:
-                used_ids.add(int(source.split("__")[0]))
-
-        target: dict[str, int] = {}
-        absent: list[str] = []
-        for dataset_id in sorted(used_ids):
-            perm_id = available.get(dataset_id)
-            if perm_id is None:
-                absent.append(f"датасет {dataset_id}")
-            else:
-                target[f"датасет {dataset_id}"] = perm_id
-        named = self.client.named_permissions(PUBLIC_REQUIRED_PERMISSIONS)
-        for permission, view in PUBLIC_REQUIRED_PERMISSIONS:
-            key = f"{permission} on {view}"
-            if key in named:
-                target[key] = named[key]
-            else:
-                absent.append(key)
+        target, absent = self._public_targets()
 
         if absent:
             raise SupersetError(
