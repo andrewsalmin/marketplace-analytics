@@ -201,6 +201,47 @@ class TestSyncBigNumbers:
         assert settled.client.puts == [], "идемпотентность: повтор не пишет"
         assert settled.planned == []
 
+    def test_description_only_change_is_reported_and_written(self):
+        """План обязан показывать правку одной лишь подсказки.
+
+        Описание хранится не в form_data, поэтому сравнивать его надо
+        отдельно. Пока этого не было, изменение текста не доезжало
+        вовсе; а когда доехало — писалось молча, и план обещал «0
+        изменений» там, где применение всё-таки писало.
+        """
+        same = {
+            "id": 7,
+            "slice_name": "KPI · Заказы",
+            "form_data": {},
+            "description": "старый текст",
+        }
+        runner = self._runner([same])
+        spec = self._spec(description="новый текст")
+        runner.sync_big_numbers([spec])
+
+        assert runner.planned, "правка подсказки обязана попасть в план"
+        assert runner.client.puts[0][1]["description"] == "новый текст"
+
+    def test_unchanged_description_does_not_rewrite_the_card(self):
+        created = self._runner([])
+        spec = self._spec(description="текст")
+        created.sync_big_numbers([spec])
+        params = json.loads(created.client.posts[0][1]["params"])
+
+        settled = self._runner(
+            [
+                {
+                    "id": 7,
+                    "slice_name": "KPI · Заказы",
+                    "form_data": params,
+                    "description": "текст",
+                }
+            ]
+        )
+        settled.sync_big_numbers([spec])
+
+        assert settled.client.puts == [], "идемпотентность: повтор не пишет"
+
     def test_retired_settings_are_removed_from_the_card(self):
         """Снятая настройка обязана исчезнуть из чарта, а не остаться в нём.
 
