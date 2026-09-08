@@ -498,6 +498,64 @@ SELECT load_date, 'Платежи', count()
 FROM marketplace_analytics.quarantine_payments
 GROUP BY load_date;
 
+-- Длительности этапов воронки, по строке на этап каждого заказа.
+--
+-- Отличается от order_funnel_stages: та отвечает «сколько заказов
+-- дошло», эта — «сколько времени занял переход». Отсюда перцентили
+-- таймингов.
+--
+-- Строится на marketplace_marts.orders, а не на сыром слое: раньше это
+-- был виртуальный датасет внутри Superset, который читал
+-- marketplace_analytics.orders FINAL напрямую. То есть FINAL был сказан
+-- ещё раз, мимо семантического слоя, и определение этапа жило не в
+-- репозитории, а в поле ввода веб-интерфейса.
+CREATE OR REPLACE VIEW marketplace_marts.order_stage_durations AS
+SELECT order_id, '1. Оплата' AS stage,
+       dateDiff('second', created_at, paid_at) AS duration_seconds
+FROM marketplace_marts.orders
+WHERE paid_at IS NOT NULL
+UNION ALL
+SELECT order_id, '2. Отправка',
+       dateDiff('second', paid_at, shipped_at)
+FROM marketplace_marts.orders
+WHERE paid_at IS NOT NULL AND shipped_at IS NOT NULL
+UNION ALL
+SELECT order_id, '3. Доставка',
+       dateDiff('second', shipped_at, ready_for_pickup_at)
+FROM marketplace_marts.orders
+WHERE shipped_at IS NOT NULL AND ready_for_pickup_at IS NOT NULL
+UNION ALL
+SELECT order_id, '4. Получение',
+       dateDiff('second', ready_for_pickup_at, delivered_at)
+FROM marketplace_marts.orders
+WHERE ready_for_pickup_at IS NOT NULL AND delivered_at IS NOT NULL;
+
+-- Порядковый номер заказа у покупателя: первый, второй, третий.
+--
+-- Нужен, чтобы отделить новые заказы от повторных, не сравнивая даты
+-- в каждом чарте заново.
+CREATE OR REPLACE VIEW marketplace_marts.orders_with_sequence AS
+SELECT
+    order_id,
+    customer_id,
+    created_at,
+    amount_kopecks,
+    status,
+    status_ru,
+    row_number() OVER (PARTITION BY customer_id ORDER BY created_at) AS order_seq
+FROM marketplace_marts.orders;
+
+-- Сколько заказов у каждого покупателя.
+--
+-- Только по тем, у кого заказы есть: покупатели без единого заказа сюда
+-- не попадают вовсе, и распределение по числу заказов начинается с
+-- единицы. Тех, кто не купил ни разу, считает customer_first_order —
+-- там для этого есть has_order.
+CREATE OR REPLACE VIEW marketplace_marts.customer_order_counts AS
+SELECT customer_id, count() AS orders_count
+FROM marketplace_marts.orders
+GROUP BY customer_id;
+
 -- Свежесть пайплайна по каждой сущности отдельно.
 --
 -- _load_commits пишется только после того, как таблица за load_date

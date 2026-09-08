@@ -709,11 +709,22 @@ SELECT status, count() FROM orders FINAL GROUP BY status
 - **Уровень 1** — `customers` / `orders` / `payments`: дедупликация
   (`FINAL`) и словари enum'ов в человеческие подписи. Единственное
   место, где произносится `FINAL`.
-- **Уровень 2** — `order_funnel_stages`, `orders_with_customer_dim`,
-  `customer_first_order`, `first_order_delay_distribution`,
-  `refund_processing_times`, `dq_reason_breakdown`,
-  `quarantine_volume`, `load_freshness`. Строятся поверх уровня 1,
-  поэтому `FINAL` и словари в них не повторяются.
+- **Уровень 2** — `order_funnel_stages`, `order_stage_durations`,
+  `orders_with_customer_dim`, `orders_with_sequence`,
+  `customer_first_order`, `customer_order_counts`,
+  `first_order_delay_distribution`, `refund_processing_times`,
+  `dq_reason_breakdown`, `quarantine_volume`, `load_freshness`,
+  `orders_by_hour_dow`, `customer_cohort_retention`,
+  `payment_retries_distribution`. Строятся поверх уровня 1, поэтому
+  `FINAL` и словари в них не повторяются.
+
+Три витрины уровня 2 появились позже остальных: `order_stage_durations`,
+`orders_with_sequence` и `customer_order_counts` были виртуальными
+датасетами внутри Superset, читавшими `marketplace_analytics.orders
+FINAL` напрямую. Их SQL жил в поле ввода веб-интерфейса — не в
+репозитории, не под ревью, не под тестами, — и `FINAL` в нём
+произносился мимо семантического слоя, ради избавления от чего слой и
+заводился.
 
 Отдельная база, а не префикс: сырой и семантический слои разделены
 физически, и витрина может называться `orders`, не конфликтуя с
