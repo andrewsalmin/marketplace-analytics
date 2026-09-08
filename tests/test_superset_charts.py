@@ -201,22 +201,40 @@ class TestSyncBigNumbers:
         assert settled.client.puts == [], "идемпотентность: повтор не пишет"
         assert settled.planned == []
 
-    def test_currency_is_written_only_where_asked(self):
-        """Пустая валюта — не то же самое, что её отсутствие.
+    def test_retired_settings_are_removed_from_the_card(self):
+        """Снятая настройка обязана исчезнуть из чарта, а не остаться в нём.
 
-        Superset, увидев ключ currency_format, рисует суффикс; с пустым
-        значением это пустой суффикс и лишний отступ у числа.
+        Карточка обновляется через update(): тот перезаписывает и
+        добавляет, но не удаляет. Убрать поле из описания поэтому мало —
+        Superset продолжит рисовать «230M RUB» по настройке, про которую
+        в коде уже ни слова, и расхождение будет видно только глазами.
         """
-        plain = self._runner([])
-        plain.sync_big_numbers([self._spec()])
-        assert "currency_format" not in json.loads(plain.client.posts[0][1]["params"])
+        stale = {
+            "id": 7,
+            "slice_name": "KPI · Заказы",
+            "form_data": {
+                "currency_format": {"symbol": "RUB", "symbolPosition": "suffix"}
+            },
+        }
+        runner = self._runner([stale])
 
-        money = self._runner([])
-        money.sync_big_numbers(
-            [self._spec(currency={"symbol": "RUB", "symbolPosition": "suffix"})]
+        runner.sync_big_numbers([self._spec()])
+
+        written = json.loads(runner.client.puts[0][1]["params"])
+        assert "currency_format" not in written
+
+    def test_retired_keys_do_not_break_idempotency(self):
+        """Чистая карточка не должна переписываться из-за этой уборки."""
+        created = self._runner([])
+        created.sync_big_numbers([self._spec()])
+        params = json.loads(created.client.posts[0][1]["params"])
+
+        settled = self._runner(
+            [{"id": 7, "slice_name": "KPI · Заказы", "form_data": params}]
         )
-        written = json.loads(money.client.posts[0][1]["params"])
-        assert written["currency_format"]["symbol"] == "RUB"
+        settled.sync_big_numbers([self._spec()])
+
+        assert settled.client.puts == [], "идемпотентность: повтор не пишет"
 
     def test_duplicate_outside_the_dashboard_is_not_recreated(self, capsys):
         """Одноимённый чарт вне дашборда — повод остановиться.
