@@ -122,6 +122,40 @@ PUBLIC_EXTRA_PERMISSIONS = [
     ("can_language_pack", "Superset"),
 ]
 
+# 6.6. Ровно то, что нужно анонимному посетителю, чтобы открыть дашборд
+# и пользоваться фильтрами. Список получен не из документации, а из
+# наблюдения: какие запросы делает браузер при загрузке дашборда под
+# анонимной сессией.
+#
+# Каждая строка — с причиной, потому что снимать права опаснее, чем
+# выдавать: лишнее право это риск, недостающее — пустой экран.
+PUBLIC_REQUIRED_PERMISSIONS = [
+    # Собственно страница дашборда.
+    ("can_dashboard", "Superset"),
+    # Список чартов и раскладка: GET /api/v1/dashboard/{id}.
+    ("can_read", "Dashboard"),
+    # Данные чартов: POST /api/v1/chart/data.
+    ("can_read", "Chart"),
+    # Диалог периода превращает «Last week» в даты: /api/v1/time_range/.
+    ("can_time_range", "Api"),
+    # Словарь переводов. Без него анонимный посетитель получает вместо
+    # JSON страницу логина, разбор падает, и не рисуется ни один чарт.
+    ("can_language_pack", "Superset"),
+]
+
+# Права, которые у роли есть, но дашборду не нужны, — и почему их не
+# должно быть у анонима:
+#
+#   can_read on Dataset          — GET /api/v1/dataset/ отдаёт описания
+#                                  датасетов вместе с SQL виртуальных
+#   can_explore_json on Superset — legacy-эндпоинт данных; дашборд
+#                                  ходит в /api/v1/chart/data
+#   can_get on Datasource        — служебное для конструктора чартов
+#   can_external_metadata on ... — то же, читает метаданные источника
+#   schema_access on [...].[marketplace_analytics]
+#                                — ковровый доступ ко всей сырой схеме,
+#                                  включая карантин и _load_commits
+
 # Горизонт зависит от того, что метрика измеряет, и путать их дорого.
 #
 # SETTLED — оплачен заказ или нет; ясно на следующий день. Этим отсекают
@@ -1510,6 +1544,112 @@ class Runner:
         if still_missing:
             raise SupersetError("Права не записались: " + ", ".join(still_missing))
 
+    def narrow_public_access(self, role_name: str) -> None:
+        """Оставляет роли ровно то, что нужно для просмотра дашборда.
+
+        Обратная операция к grant_public_access, и куда опаснее: та
+        только добавляла, а эта снимает. Поэтому набор считается не «всё
+        текущее минус подозрительное», а с нуля — какие датасеты реально
+        используют чарты этого дашборда плюс перечисленные поимённо
+        функциональные права. Что не попало в набор, снимается.
+
+        Состав датасетов берётся из самих чартов, а не из списка в коде:
+        список рассохнется при первом же новом чарте, а чарты — это и
+        есть определение того, что дашборду нужно.
+        """
+        role = self.client.role_by_name(role_name)
+        if role is None:
+            print(f"  ! роль «{role_name}» не найдена — права не тронуты")
+            return
+
+        current = self.client.role_permission_ids(role["id"])
+        available = self.client.datasource_permissions()
+
+        used_ids = set()
+        for chart in self.client.charts(self.dashboard_id).values():
+            source = str(chart["form_data"].get("datasource") or "")
+            if source:
+                used_ids.add(int(source.split("__")[0]))
+
+        target: dict[str, int] = {}
+        absent: list[str] = []
+        for dataset_id in sorted(used_ids):
+            perm_id = available.get(dataset_id)
+            if perm_id is None:
+                absent.append(f"датасет {dataset_id}")
+            else:
+                target[f"датасет {dataset_id}"] = perm_id
+        named = self.client.named_permissions(PUBLIC_REQUIRED_PERMISSIONS)
+        for permission, view in PUBLIC_REQUIRED_PERMISSIONS:
+            key = f"{permission} on {view}"
+            if key in named:
+                target[key] = named[key]
+            else:
+                absent.append(key)
+
+        if absent:
+            raise SupersetError(
+                "Не найдены объекты прав: " + ", ".join(absent) + ". "
+                "Сужение остановлено, чтобы не оставить роль без доступа."
+            )
+
+        keep = set(target.values())
+        extra = current - keep
+        rows = {r["id"]: r for r in self.client._permission_rows()}
+
+        def describe(pid: int) -> str:
+            row = rows.get(pid)
+            if not row:
+                return f"право {pid}"
+            perm = row.get("permission", {}).get("name")
+            view = row.get("view_menu", {}).get("name")
+            return f"{perm} on {view}"
+
+        added = keep - current
+        if not extra and not added:
+            print(f"  Роль «{role_name}»: набор прав уже точный ({len(keep)}).")
+            return
+
+        # Показываются обе стороны. Снятие коврового schema_access почти
+        # всегда идёт вместе с выдачей точечных прав на те датасеты,
+        # которые этим ковром и были прикрыты, — и умолчать о выдаче
+        # значило бы отчитаться только о половине операции.
+        self.log(
+            f"Роль «{role_name}»: снять {len(extra)}, выдать {len(added)}, "
+            f"итого {len(keep)}"
+        )
+        for pid in sorted(extra, key=describe):
+            print(f"      − {describe(pid)}")
+        for pid in sorted(added, key=describe):
+            print(f"      + {describe(pid)}")
+
+        if not self.apply:
+            return
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup = f"superset_role_{role_name}_{stamp}.json"
+        with open(backup, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "role": role_name,
+                    "id": role["id"],
+                    "permission_ids": sorted(current),
+                },
+                fh,
+                ensure_ascii=False,
+                indent=2,
+            )
+        print(f"    снимок прав роли: {backup}")
+
+        self.client.set_role_permissions(role["id"], keep)
+
+        after = self.client.role_permission_ids(role["id"])
+        if after != keep:
+            raise SupersetError(
+                f"Роль «{role_name}» после записи содержит не то, что "
+                f"ожидалось. Восстанови по снимку {backup}"
+            )
+
     # --- чарты ---------------------------------------------------------
 
     def patch_charts(self, phases: set[str]) -> None:
@@ -2172,6 +2312,12 @@ def main() -> int:
         help="удалить чарты по id через запятую; ссылающиеся на дашборд не трогает",
     )
     parser.add_argument(
+        "--narrow-public",
+        default="",
+        metavar="РОЛЬ",
+        help="оставить роли только права, нужные для просмотра дашборда",
+    )
+    parser.add_argument(
         "--diagnose",
         action="store_true",
         help="показать, что API отдаёт по датасетам, и выйти",
@@ -2272,6 +2418,10 @@ def main() -> int:
     if args.public_role:
         print("\nПрава:")
         runner.grant_public_access(args.public_role)
+
+    if args.narrow_public:
+        print("\nСужение прав:")
+        runner.narrow_public_access(args.narrow_public)
 
     print(f"\nИтого изменений: {len(runner.planned)}")
     if not args.apply and runner.planned:
