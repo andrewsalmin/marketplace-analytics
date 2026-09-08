@@ -1150,6 +1150,11 @@ RETIRED_CARD_KEYS = ["currency_format"]
 # 1280 px, где заголовок обрезался у всех пяти, а из 240 px высоты
 # содержимое занимало 155. Четыре карточки по три колонки дают ровно
 # двенадцать и вдвое больше места под заголовок.
+# Высота блока выводов в единицах по 8 px. Три пункта по две-три
+# строки — примерно 200 px; при нехватке Superset прячет текст под
+# прокрутку внутри блока, чего на обзоре быть не должно.
+MARKDOWN_HEIGHT = 26
+
 KPI_CARD_WIDTH = 3
 KPI_CARD_HEIGHT = 20
 # Карточки качества данных чуть просторнее: их имена длиннее («Отставание
@@ -1251,7 +1256,56 @@ TAB_NAMES = {  # P1-11
 
 # P2-03. Overview дублировал Orders — эти размещения убираются с обзора,
 # сами чарты остаются на своих тематических вкладках.
-OVERVIEW_DUPLICATES = ["CHART-explore-20-2", "CHART-explore-2-2"]
+# CHART-explore-20-2 отсюда убран намеренно: это тренд GMV, и его место
+# как раз на обзоре — оборот и есть главный вопрос к дашборду. Теперь он
+# стоит там под собственным ключом, см. OVERVIEW_TRENDS.
+OVERVIEW_DUPLICATES = ["CHART-explore-2-2"]
+
+# 6.4. Обзор — короткий экран, а не свалка.
+#
+# Было четыре карточки и шесть графиков подряд, причём половина из них
+# дублировала содержимое других вкладок: регистрации живут в
+# «Покупателях», отбраковка — в «Качестве данных». Осталось четыре
+# тренда, отвечающих на четыре разных вопроса: сколько денег, сколько
+# заказов, доходят ли платежи, много ли теряем на отменах.
+OVERVIEW_TRENDS: list[tuple[str, list[tuple[str, str, int, int]]]] = [
+    (
+        "ROW-ov-trends-1",
+        [
+            ("CHART-ov-gmv", "Динамика GMV (среднее за 7 дней)", 6, 50),
+            ("CHART-ov-orders", "Динамика числа заказов (среднее за 7 дней)", 6, 50),
+        ],
+    ),
+    (
+        "ROW-ov-trends-2",
+        [
+            ("CHART-ov-payments", "Динамика доли успешных оплат", 6, 50),
+            ("CHART-ov-cancel", "Динамика долей отмен и возвратов", 6, 50),
+        ],
+    ),
+]
+
+# Выводы на обзоре. Каждый — с периодом, числом и указанием, где его
+# перепроверить: утверждение, которое нельзя проверить, на дашборде
+# бесполезно.
+#
+# Причинности здесь намеренно нет. Сказать «канал X самый выгодный»
+# нельзя, не зная расходов на привлечение, а их в данных нет вовсе —
+# такой вывод был бы не выводом, а догадкой с точностью до процента.
+#
+# Числа — срез на дату последней загрузки; после перегенерации данных
+# их нужно обновить (об этом сказано в superset/README.md).
+OVERVIEW_FINDINGS = """### Что видно в данных за 1 июня — 7 сентября 2026
+
+- **Конверсия в первый заказ — 73,8%.** Из 11 396 покупателей,
+  зарегистрировавшихся не позже чем за 30 дней до конца периода, заказ
+  сделали 8 406; остальные 2 990 не сделали ни одного. Проверяется на
+  вкладке «Покупатели».
+- **Две трети отмен — это неоплата в срок.** 66,2% отменённых заказов
+  отменены с причиной «Не оплачен вовремя». Проверяется на вкладке
+  «Заказы», график «Причины отмены заказов».
+- **Треть оборота даёт Москва — 32,5% GMV.** Проверяется на вкладке
+  «Покупатели», график «GMV по городам (топ-10)»."""
 
 
 # ---------------------------------------------------------------------------
@@ -1709,6 +1763,7 @@ class Runner:
             self._kpi_row(position, kpi_ids)
             self._dq_row(position, kpi_ids)
             self._drop_overview_duplicates(position)
+            self._overview_layout(position)
 
         after = (
             json.dumps(position, sort_keys=True),
@@ -1865,6 +1920,101 @@ class Runner:
                 for spec in DQ_CHARTS
             ],
         )
+
+    def _overview_layout(self, position: dict[str, Any]) -> None:
+        """Приводит вкладку «Обзор» к объявленному составу.
+
+        Обзор задаётся целиком, а не правится по кусочкам: иначе всё
+        снова зарастает. Порядок сверху вниз — карточки, выводы, четыре
+        тренда; всё остальное с вкладки убирается.
+
+        Чарты при этом не удаляются, только снимаются с обзора: каждый
+        из них живёт ещё и на своей тематической вкладке, а удаление
+        чарта необратимо.
+        """
+        tab = position.get("TAB-overview")
+        if not tab:
+            return
+
+        by_name = {name: ch["id"] for name, ch in self.client.charts(
+            self.dashboard_id
+        ).items()}
+
+        wanted: list[str] = ["ROW-ov-kpi", "ROW-ov-findings"]
+        for row_id, charts in OVERVIEW_TRENDS:
+            if all(by_name.get(name) for _, name, _, _ in charts):
+                wanted.append(row_id)
+
+        self._sync_markdown(
+            position,
+            tab_id="TAB-overview",
+            row_id="ROW-ov-findings",
+            block_id="MARKDOWN-ov-findings",
+            code=OVERVIEW_FINDINGS,
+        )
+        for row_id, charts in OVERVIEW_TRENDS:
+            self._sync_row(
+                position,
+                tab_id="TAB-overview",
+                row_id=row_id,
+                at_index=len(tab["children"]),
+                charts=[
+                    (key, name, by_name.get(name), width, height)
+                    for key, name, width, height in charts
+                ],
+            )
+
+        present = [key for key in wanted if key in position]
+        for key in list(tab.get("children", [])):
+            if key in present:
+                continue
+            self._detach(position, key)
+        tab["children"] = present
+
+    @staticmethod
+    def _detach(position: dict[str, Any], key: str) -> None:
+        """Убирает узел раскладки вместе с потомками."""
+        node = position.pop(key, None)
+        if not node:
+            return
+        for child in node.get("children", []):
+            Runner._detach(position, child)
+
+    @staticmethod
+    def _sync_markdown(
+        position: dict[str, Any],
+        tab_id: str,
+        row_id: str,
+        block_id: str,
+        code: str,
+    ) -> None:
+        tab = position.get(tab_id)
+        if not tab:
+            return
+        row_parents = [*tab["parents"], tab_id]
+        row = position.get(row_id)
+        if row is None:
+            row = position[row_id] = {
+                "type": "ROW",
+                "id": row_id,
+                "children": [block_id],
+                "parents": row_parents,
+                "meta": {"background": "BACKGROUND_TRANSPARENT"},
+            }
+        row["children"] = [block_id]
+        row["parents"] = row_parents
+
+        block = position.get(block_id)
+        if block is None:
+            block = position[block_id] = {
+                "type": "MARKDOWN",
+                "id": block_id,
+                "children": [],
+                "parents": [],
+                "meta": {},
+            }
+        block["parents"] = [*row_parents, row_id]
+        block["meta"].update({"width": 12, "height": MARKDOWN_HEIGHT, "code": code})
 
     def _sync_row(
         self,

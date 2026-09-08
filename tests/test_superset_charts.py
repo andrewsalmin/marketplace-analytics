@@ -274,6 +274,133 @@ class TestSlugsAreUnique:
         assert arf._slug("Payment success rate") == "payment_success_rate"
 
 
+class TestOverviewLayout:
+    """Обзор задаётся целиком, и это опасная операция — она убирает.
+
+    Убирает, но не удаляет: снятый с обзора чарт живёт на своей
+    тематической вкладке, а удаление чарта в Superset необратимо.
+    """
+
+    NAMES = [
+        "Динамика GMV (среднее за 7 дней)",
+        "Динамика числа заказов (среднее за 7 дней)",
+        "Динамика доли успешных оплат",
+        "Динамика долей отмен и возвратов",
+    ]
+
+    class _Client:
+        def __init__(self, names):
+            self.names = names
+            self.deleted = []
+
+        def charts(self, dashboard_id):
+            return {
+                n: {"id": 100 + i, "slice_name": n}
+                for i, n in enumerate(self.names)
+            }
+
+        def delete(self, path):
+            self.deleted.append(path)
+            return {}
+
+    def _runner(self, names=None):
+        runner = arf.Runner.__new__(arf.Runner)
+        runner.client = self._Client(self.NAMES if names is None else names)
+        runner.dashboard_id = 1
+        runner.apply = True
+        runner.planned = []
+        return runner
+
+    def _position(self):
+        """Обзор до пересборки: карточки плюс три чужие строки."""
+        base = ["ROOT_ID", "GRID_ID", "TABS-main"]
+        pos = {
+            "TAB-overview": {
+                "type": "TAB",
+                "id": "TAB-overview",
+                "children": ["ROW-ov-kpi", "ROW-old-1", "ROW-old-2"],
+                "parents": base,
+                "meta": {"text": "Обзор"},
+            },
+            "ROW-ov-kpi": {
+                "type": "ROW",
+                "id": "ROW-ov-kpi",
+                "children": [],
+                "parents": [*base, "TAB-overview"],
+                "meta": {},
+            },
+        }
+        for row, chart_id in (("ROW-old-1", 9), ("ROW-old-2", 13)):
+            key = f"CHART-old-{chart_id}"
+            pos[row] = {
+                "type": "ROW",
+                "id": row,
+                "children": [key],
+                "parents": [*base, "TAB-overview"],
+                "meta": {},
+            }
+            pos[key] = {
+                "type": "CHART",
+                "id": key,
+                "children": [],
+                "parents": [*base, "TAB-overview", row],
+                "meta": {"chartId": chart_id, "width": 6, "height": 50},
+            }
+        return pos
+
+    def test_overview_ends_up_with_the_declared_blocks(self):
+        runner = self._runner()
+        position = self._position()
+
+        runner._overview_layout(position)
+
+        assert position["TAB-overview"]["children"] == [
+            "ROW-ov-kpi",
+            "ROW-ov-findings",
+            "ROW-ov-trends-1",
+            "ROW-ov-trends-2",
+        ]
+
+    def test_charts_are_taken_off_the_tab_but_not_deleted(self):
+        runner = self._runner()
+        position = self._position()
+
+        runner._overview_layout(position)
+
+        assert "CHART-old-9" not in position, "узел обязан уйти из раскладки"
+        assert runner.client.deleted == [], "чарты удалять нельзя"
+
+    def test_findings_carry_numbers_and_where_to_check_them(self):
+        runner = self._runner()
+        position = self._position()
+
+        runner._overview_layout(position)
+
+        code = position["MARKDOWN-ov-findings"]["meta"]["code"]
+        assert "%" in code, "вывод без числа проверить нельзя"
+        assert code.count("Проверяется") >= 2, "нужно минимум два проверяемых вывода"
+
+    def test_running_twice_changes_nothing(self):
+        runner = self._runner()
+        position = self._position()
+
+        runner._overview_layout(position)
+        once = json.dumps(position, sort_keys=True, ensure_ascii=False)
+        runner._overview_layout(position)
+
+        assert json.dumps(position, sort_keys=True, ensure_ascii=False) == once
+
+    def test_missing_chart_leaves_its_row_out_rather_than_breaking(self):
+        """Не нашли чарт — строки просто нет, а не есть пустая."""
+        runner = self._runner(names=self.NAMES[:2])
+        position = self._position()
+
+        runner._overview_layout(position)
+
+        assert "ROW-ov-trends-2" not in position["TAB-overview"]["children"]
+        assert "ROW-ov-trends-1" in position["TAB-overview"]["children"]
+
+
 class TestFilterNamesAreStable:
     """Имя фильтра обязано быть одинаковым от запуска к запуску.
 
