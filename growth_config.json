@@ -1,6 +1,6 @@
 {
   "start_date": "2026-06-01",
-  "days": 92,
+  "days": 95,
   "ramp_days": 27,
   "base_customers": 80,
   "customers_ramp_per_day": 4,

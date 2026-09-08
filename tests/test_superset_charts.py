@@ -344,6 +344,13 @@ class TestOverviewLayout:
             self.deleted.append(path)
             return {}
 
+    @pytest.fixture(autouse=True)
+    def _no_clickhouse(self, monkeypatch):
+        """Тесты раскладки не ходят в базу — иначе прогон ждёт таймаут."""
+        import overview_findings
+
+        monkeypatch.setattr(overview_findings, "available", lambda: False)
+
     def _runner(self, names=None):
         runner = arf.Runner.__new__(arf.Runner)
         runner.client = self._Client(self.NAMES if names is None else names)
@@ -411,15 +418,38 @@ class TestOverviewLayout:
         assert "CHART-old-9" not in position, "узел обязан уйти из раскладки"
         assert runner.client.deleted == [], "чарты удалять нельзя"
 
-    def test_findings_carry_numbers_and_where_to_check_them(self):
+    def test_findings_are_recomputed_from_the_data(self, monkeypatch):
+        import overview_findings
+
+        monkeypatch.setattr(overview_findings, "available", lambda: True)
+        monkeypatch.setattr(overview_findings, "render", lambda: "### свежий текст")
         runner = self._runner()
         position = self._position()
 
         runner._overview_layout(position)
 
-        code = position["MARKDOWN-ov-findings"]["meta"]["code"]
-        assert "%" in code, "вывод без числа проверить нельзя"
-        assert code.count("Проверяется") >= 2, "нужно минимум два проверяемых вывода"
+        assert position["MARKDOWN-ov-findings"]["meta"]["code"] == "### свежий текст"
+
+    def test_existing_text_survives_when_clickhouse_is_unreachable(
+        self, monkeypatch
+    ):
+        """Показать устаревшие числа плохо; затереть их пустотой — хуже."""
+        import overview_findings
+
+        monkeypatch.setattr(overview_findings, "available", lambda: False)
+        runner = self._runner()
+        position = self._position()
+        position["MARKDOWN-ov-findings"] = {
+            "type": "MARKDOWN",
+            "id": "MARKDOWN-ov-findings",
+            "children": [],
+            "parents": [],
+            "meta": {"code": "### прежний текст"},
+        }
+
+        runner._overview_layout(position)
+
+        assert position["MARKDOWN-ov-findings"]["meta"]["code"] == "### прежний текст"
 
     def test_running_twice_changes_nothing(self):
         runner = self._runner()

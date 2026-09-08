@@ -33,6 +33,7 @@ py-modules = [
     "clickhouse_ddl",
     "load_to_clickhouse",
     "marts_checks",
+    "overview_findings",
     "transform",
 ]
 
