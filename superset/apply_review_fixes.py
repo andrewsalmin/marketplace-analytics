@@ -1153,6 +1153,10 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "sort_y_axis": "alpha_desc",
                 "sort_x_axis": "alpha_asc",
                 "time_grain_sqla": None,
+                # «auto» отмеряет поле по подписи на один знак короче,
+                # чем она есть: у дат срезало первую цифру года, и все
+                # строки читались как «026-06-01». Ширина задана явно.
+                "left_margin": 90,
             },
             "replace_filters": [],
             "filters": [("is_mature = 1", "is_mature")],
