@@ -422,7 +422,11 @@ WITH
         ))) AS weeks_since_signup
     )
 SELECT
-    formatDateTime(s.cohort_week, '%m-%d') AS cohort_week,
+    -- Дата целиком, а не '%m-%d': «06-01» читается как пара чисел, а
+    -- не как первое июня. Подпись обязана оставаться сортируемой как
+    -- строка — по ней heatmap упорядочивает строки, — и ISO это даёт,
+    -- в том числе на стыке лет, чего сокращённая форма не давала.
+    formatDateTime(s.cohort_week, '%Y-%m-%d') AS cohort_week,
     s.cohort_week AS cohort_week_date,
     o.weeks_since_signup AS weeks_since_signup,
     s.cohort_size AS cohort_size,
