@@ -1144,10 +1144,20 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             "set": {
                 "metric": metric("Retention", "avg(retention_rate)"),
                 "groupby": "cohort_week",
+                # Столбцы подписаны словом, а не одним числом: «00»,
+                # «01», «02» читались как код, а не как счётчик недель.
+                #
+                # Ведущий ноль остаётся: тепловая карта упорядочивает
+                # столбцы по подписи как по строке, и без него после
+                # «1» шла бы «10». Постоянная приставка сортировке не
+                # мешает — сравниваются те же цифры.
                 "x_axis": {
                     "expressionType": "SQL",
-                    "label": "Недель с регистрации",
-                    "sqlExpression": "leftPad(toString(weeks_since_signup), 2, '0')",
+                    "label": "Отсчёт от регистрации",
+                    "sqlExpression": (
+                        "concat('Неделя ',"
+                        " leftPad(toString(weeks_since_signup), 2, '0'))"
+                    ),
                 },
                 "y_axis_format": ".0%",
                 "sort_y_axis": "alpha_desc",
