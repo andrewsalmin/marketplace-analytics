@@ -604,6 +604,45 @@ DATASETS: dict[str, dict[str, str]] = {
 }
 
 
+# Колонки, тип которых Superset определил неверно.
+#
+# cohort_week — подпись когорты, строка «06-01». Superset пометил её
+# временной и заодно назначил главной временной колонкой датасета,
+# поэтому тепловая карта форматировала её как дату и на всех строках
+# стояло «01.01.1970»: столько получается, если прочитать «06-01» как
+# метку времени. Проценты в ячейках при этом были верные — сломаны были
+# только подписи строк.
+#
+# Настоящая дата когорты лежит рядом, в cohort_week_date; она и
+# становится временной колонкой датасета.
+DATASET_COLUMNS: dict[str, dict[str, Any]] = {
+    "customer_cohort_retention": {
+        "main_dttm_col": "cohort_week_date",
+        "is_dttm": {"cohort_week": False, "cohort_week_date": True},
+    },
+}
+
+# Поля колонки, которые принимает PUT /api/v1/dataset. Всё остальное,
+# что отдаёт GET (type_generic, id датасета, флаги сертификации),
+# схема отвергает с 400, поэтому список именно белый.
+COLUMN_FIELDS = (
+    "id",
+    "column_name",
+    "verbose_name",
+    "description",
+    "expression",
+    "filterable",
+    "groupby",
+    "is_active",
+    "is_dttm",
+    "python_date_format",
+    "type",
+    "advanced_data_type",
+    "extra",
+    "uuid",
+)
+
+
 # ---------------------------------------------------------------------------
 # Патчи чартов
 # ---------------------------------------------------------------------------
@@ -764,6 +803,14 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "time_grain_sqla": None,
                 **PERCENTILE_ORDER,
             },
+            # От прежней, временной версии чарта в измерениях остался
+            # refunded_at. В запрос эта колонка не попадает — разрез
+            # теперь по refund_kind, — но пост-обработка на неё
+            # ссылается, и чарт отвечал «Referenced columns not
+            # available in DataFrame» вместо графика. Ключ снимается, а
+            # не переписывается: update() умеет добавлять, но не
+            # удалять, и старое значение пережило бы правку описания.
+            "unset": ["columns"],
             "replace_filters": [],
         },
         "Средний чек по городам (топ-10)": {
@@ -1486,6 +1533,46 @@ class Runner:
                 # снятые со старого SQL: новых (status_ru, is_mature) в
                 # списке не будет, и чарты по ним не соберутся.
                 self.client.put(f"/api/v1/dataset/{existing['id']}/refresh", {})
+
+    def sync_dataset_columns(self, phases: set[str]) -> None:
+        """Правит метаданные колонок там, где Superset ошибся с типом.
+
+        Колонки уходят на сервер списком целиком: PUT сверяет присланное
+        с тем, что есть, и колонку, которой в списке нет, удаляет. Даже
+        одна правка флага требует переслать все остальные как есть.
+        """
+        for name, fixes in DATASET_COLUMNS.items():
+            spec = DATASETS.get(name)
+            if spec is None or spec["phase"] not in phases:
+                continue
+            existing = self.datasets.get(name)
+            if existing is None:
+                continue
+
+            detail = self.client.get(f"/api/v1/dataset/{existing['id']}")["result"]
+            wanted = fixes.get("is_dttm", {})
+            columns = []
+            changed = []
+            for column in detail.get("columns", []):
+                trimmed = {k: column[k] for k in COLUMN_FIELDS if k in column}
+                target = wanted.get(column["column_name"])
+                if target is not None and bool(column.get("is_dttm")) != target:
+                    trimmed["is_dttm"] = target
+                    changed.append(column["column_name"])
+                columns.append(trimmed)
+
+            payload: dict[str, Any] = {}
+            main = fixes.get("main_dttm_col")
+            if main and detail.get("main_dttm_col") != main:
+                payload["main_dttm_col"] = main
+                changed.append(f"главная временная колонка -> {main}")
+            if not changed:
+                continue
+
+            payload["columns"] = columns
+            self.log(f"тип колонок датасета {name}: {', '.join(changed)}")
+            if self.apply:
+                self.client.put(f"/api/v1/dataset/{existing['id']}", payload)
 
     def _create_dataset(self, name: str, spec: dict[str, str]) -> None:
         self.log(f"{spec['note']}: новый датасет {MARTS_SCHEMA}.{name}")
@@ -2509,6 +2596,7 @@ def main() -> int:
 
     print("Витрины:")
     runner.sync_datasets(phases)
+    runner.sync_dataset_columns(phases)
 
     print("\nЧарты:")
     runner.patch_charts(phases)
