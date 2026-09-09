@@ -305,6 +305,14 @@ class TestLoadCommitMarker:
         loader.drop_existing_partitions(self._args())
 
         assert len(sent) == len(loader.PARTITIONED_TABLES)
-        # IF EXISTS обязателен: за день, где карантин пуст, партиции нет,
-        # и это не ошибка.
-        assert all("DROP PARTITION IF EXISTS" in sql for sql in sent)
+        assert sent == [
+            f"ALTER TABLE {table} DROP PARTITION '2026-06-01'"
+            for table in loader.PARTITIONED_TABLES
+        ]
+        # Прежняя версия писала «DROP PARTITION IF EXISTS», и этот тест
+        # требовал именно её — на том основании, что за день с пустым
+        # карантином партиции нет. Такого модификатора у DROP PARTITION
+        # не существует: ClickHouse отвечал синтаксической ошибкой, то
+        # есть --force-reload не работал ни разу. Отсутствующую партицию
+        # он и так пропускает молча.
+        assert not any("IF EXISTS" in sql for sql in sent)

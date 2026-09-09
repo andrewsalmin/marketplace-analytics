@@ -144,12 +144,14 @@ def is_load_date_committed(args) -> bool:
 
 def drop_existing_partitions(args) -> None:
     for table in PARTITIONED_TABLES:
-        # IF EXISTS — партиции может не быть вовсе (например, за этот
-        # день quarantine_customers пуст), это не ошибка.
+        # Без IF EXISTS: у DROP PARTITION такого модификатора нет, и
+        # запрос падал с синтаксической ошибкой — то есть --force-reload
+        # не работал вовсе. Он и не нужен: ClickHouse молча ничего не
+        # делает, если партиции нет, а её может не быть (например,
+        # quarantine_customers за этот день пуст).
         ch_execute(
             args,
-            f"ALTER TABLE {table} DROP PARTITION IF EXISTS "
-            f"'{args.load_date}'",
+            f"ALTER TABLE {table} DROP PARTITION '{args.load_date}'",
         )
 
     logger.info(
