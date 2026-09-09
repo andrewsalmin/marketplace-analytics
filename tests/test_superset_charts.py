@@ -546,3 +546,137 @@ class TestDeleteCharts:
         client = self._client()
         arf.delete_charts(client, 1, [38, 44, 999], apply=True)
         assert client.deleted == [44]
+
+
+class TestTabRows:
+    """Ширину строк на вкладках задаёт код, а не перетаскивание в UI.
+
+    Строка описана именами чартов, и это единственное место в скрипте,
+    где раскладка ссылается на чарт по имени, а не по ключу размещения.
+    Переименование чарта поэтому способно оставить вкладку без строки —
+    молча, потому что пропавшую строку скрипт просто не соберёт.
+    """
+
+    def test_every_named_chart_is_one_the_script_knows(self):
+        known = set()
+        for name, patch in arf.chart_patches().items():
+            known.add(name)
+            known.add(patch.get("slice_name", name))
+            known.update(patch.get("aliases", []))
+        for spec in arf.KPI_CHARTS + arf.DQ_CHARTS:
+            known.add(spec["name"])
+
+        named = {name for _, _, _, charts in arf.TAB_ROWS for _, name, _, _ in charts}
+        assert named <= known, f"нет такого чарта: {sorted(named - known)}"
+
+    def test_widths_add_up_to_the_grid(self):
+        for tab_id, row_id, _, charts in arf.TAB_ROWS:
+            total = sum(width for _, _, width, _ in charts)
+            assert total == 12, f"{tab_id}/{row_id}: {total} колонок из двенадцати"
+
+    def test_placement_keys_are_unique(self):
+        keys = [key for _, _, _, charts in arf.TAB_ROWS for key, *_ in charts]
+        assert len(keys) == len(set(keys)), "два размещения под одним ключом"
+
+    def test_anchor_row_is_declared_before_the_row_it_anchors(self):
+        seen: set[str] = set()
+        for _, row_id, after, _ in arf.TAB_ROWS:
+            if after is not None:
+                assert after in seen, f"{row_id} ссылается на {after} раньше времени"
+            seen.add(row_id)
+
+
+class TestDatasetColumns:
+    """Правка типа колонки шлёт на сервер весь список колонок целиком.
+
+    PUT сверяет присланное с тем, что есть, и колонку, которой в списке
+    нет, удаляет. Поэтому важны обе стороны: что нетронутые колонки
+    доехали и что в них не уехало ни одного поля, которого схема не
+    принимает, — иначе запрос отвергается целиком, с 400.
+    """
+
+    class _Client:
+        def __init__(self, detail):
+            self.detail = detail
+            self.written = []
+
+        def get(self, path):
+            return {"result": self.detail}
+
+        def put(self, path, payload):
+            self.written.append((path, payload))
+            return {}
+
+    DETAIL = {
+        "main_dttm_col": "cohort_week",
+        "columns": [
+            {
+                "id": 1,
+                "column_name": "cohort_week",
+                "type": "STRING",
+                "is_dttm": True,
+                "type_generic": 1,
+                "changed_on": "2026-09-01",
+            },
+            {
+                "id": 2,
+                "column_name": "cohort_week_date",
+                "type": "DATE",
+                "is_dttm": True,
+                "type_generic": 2,
+            },
+        ],
+    }
+
+    def _runner(self, detail):
+        runner = arf.Runner.__new__(arf.Runner)
+        runner.client = self._Client(detail)
+        runner.datasets = {"customer_cohort_retention": {"id": 16}}
+        runner.apply = True
+        runner.planned = []
+        return runner
+
+    def test_caption_column_stops_being_temporal(self):
+        runner = self._runner(json.loads(json.dumps(self.DETAIL)))
+
+        runner.sync_dataset_columns({"p1"})
+
+        _, payload = runner.client.written[0]
+        by_name = {c["column_name"]: c for c in payload["columns"]}
+        assert by_name["cohort_week"]["is_dttm"] is False
+        assert payload["main_dttm_col"] == "cohort_week_date"
+
+    def test_untouched_columns_travel_along(self):
+        runner = self._runner(json.loads(json.dumps(self.DETAIL)))
+
+        runner.sync_dataset_columns({"p1"})
+
+        _, payload = runner.client.written[0]
+        names = [c["column_name"] for c in payload["columns"]]
+        assert names == ["cohort_week", "cohort_week_date"], "колонку бы удалили"
+
+    def test_fields_the_api_rejects_are_left_out(self):
+        runner = self._runner(json.loads(json.dumps(self.DETAIL)))
+
+        runner.sync_dataset_columns({"p1"})
+
+        _, payload = runner.client.written[0]
+        for column in payload["columns"]:
+            assert set(column) <= set(arf.COLUMN_FIELDS), sorted(column)
+
+    def test_dataset_already_in_order_is_not_rewritten(self):
+        detail = json.loads(json.dumps(self.DETAIL))
+        detail["main_dttm_col"] = "cohort_week_date"
+        detail["columns"][0]["is_dttm"] = False
+        runner = self._runner(detail)
+
+        runner.sync_dataset_columns({"p1"})
+
+        assert runner.client.written == []
+
+    def test_other_phases_leave_the_dataset_alone(self):
+        runner = self._runner(json.loads(json.dumps(self.DETAIL)))
+
+        runner.sync_dataset_columns({"p0"})
+
+        assert runner.client.written == []
