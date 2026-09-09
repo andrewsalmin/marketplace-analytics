@@ -80,8 +80,12 @@ FROM marketplace_analytics.customers FINAL;
 CREATE OR REPLACE VIEW marketplace_marts.orders AS
 SELECT
     *,
+    -- «Создан», а не «Новый»: слово «новый» на этом дашборде уже занято
+    -- разбивкой заказов на первый и повторный, и одна подпись в двух
+    -- значениях путает — тем более что цвет закреплён за подписью.
+    -- «Создан» к тому же совпадает с первым этапом воронки.
     CASE status
-        WHEN 'new'              THEN 'Новый'
+        WHEN 'new'              THEN 'Создан'
         WHEN 'paid'             THEN 'Оплачен'
         WHEN 'shipped'          THEN 'Отправлен'
         WHEN 'ready_for_pickup' THEN 'Готов к выдаче'
