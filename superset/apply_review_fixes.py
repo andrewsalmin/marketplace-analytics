@@ -507,11 +507,28 @@ def rolling_mean(days: int = 7) -> dict[str, Any]:
 DATE_AXIS = {"x_axis_time_format": "%d.%m"}  # P1-01
 
 
-def sort_by_first_metric(label: str) -> dict[str, Any]:
-    """P0-07: явная сортировка категориальной оси по метрике."""
+def horizontal_bars(label: str) -> dict[str, Any]:
+    """Категории вдоль вертикали, значения — вдоль горизонтали.
+
+    Семь каналов привлечения и десять городов не помещаются подписями
+    под вертикальными столбцами: ECharts прячет те, что налезают друг
+    на друга, и из семи подписей на графике оставалось три. Поворот на
+    45° это лечит наполовину — подписи читаются, но косо и с обрезкой
+    по нижнему краю.
+
+    Развёрнутый график снимает вопрос: подпись лежит строкой слева,
+    места ей ровно столько, сколько нужно, и поворачивать нечего.
+
+    Сортировка при этом переворачивается. ECharts рисует первую
+    категорию у начала оси, а начало вертикальной оси — внизу, поэтому
+    сортировка по возрастанию даёт убывание сверху вниз, то есть то,
+    как читают такой график.
+    """
     return {
+        "orientation": "horizontal",
+        "xAxisLabelRotation": 0,
         "x_axis_sort": label,
-        "x_axis_sort_asc": False,
+        "x_axis_sort_asc": True,
         "order_desc": True,
     }
 
@@ -822,7 +839,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             "note": "P0-07 сортировка по метрике + P0-02 оплаченные заказы",
             "set": {
                 "metrics": [metric("Средний чек, ₽", AOV_PAID)],
-                **sort_by_first_metric("Средний чек, ₽"),
+                **horizontal_bars("Средний чек, ₽"),
             },
             "filters": [MATURE_FILTER],
         },
@@ -835,7 +852,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             "note": "P0-07 сортировка по метрике + P0-02 оплаченные заказы",
             "set": {
                 "metrics": [metric("GMV, ₽", GMV_PAID)],
-                **sort_by_first_metric("GMV, ₽"),
+                **horizontal_bars("GMV, ₽"),
             },
             "filters": [MATURE_FILTER],
         },
@@ -855,7 +872,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 # оси, а не устройство пайплайна.
                 "metrics": [metric("Отклонённых строк", "SUM(quarantined_rows)")],
                 "y_axis_title": "Найдено ошибок",
-                **sort_by_first_metric("Отклонённых строк"),
+                **horizontal_bars("Отклонённых строк"),
             },
         },
         "GMV по каналам привлечения": {
@@ -871,7 +888,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             "set": {
                 "metrics": [metric("GMV, ₽", GMV_PAID)],
                 "x_axis": "acquisition_channel_ru",
-                **sort_by_first_metric("GMV, ₽"),
+                **horizontal_bars("GMV, ₽"),
             },
             "filters": [MATURE_FILTER],
         },
@@ -886,7 +903,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             "set": {
                 "metrics": [metric("Средний чек, ₽", AOV_PAID)],
                 "x_axis": "acquisition_channel_ru",
-                **sort_by_first_metric("Средний чек, ₽"),
+                **horizontal_bars("Средний чек, ₽"),
             },
             "filters": [MATURE_FILTER],
         },
@@ -922,10 +939,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "часть аккаунтов остаётся без заказов."
             ),
             "note": "P1-02 горизонтальные бары + сортировка",
-            "set": {
-                "orientation": "horizontal",
-                **sort_by_first_metric("Число покупателей"),
-            },
+            "set": horizontal_bars("Число покупателей"),
         },
         "Причины отмены заказов": {
             "phase": "p1",
@@ -1156,7 +1170,10 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "x_axis": "payment_method_ru",
                 "groupby": ["status_ru"],
                 "stack": "Stack",
-                **sort_by_first_metric("Платежи"),
+                # «Банковская карта» под вертикальным столбцом не
+                # помещается, и ECharts прятал её вместе с соседками:
+                # из четырёх способов оплаты подписаны были два.
+                **horizontal_bars("Платежи"),
             },
         },
         "Распределение ретраев оплаты": {
