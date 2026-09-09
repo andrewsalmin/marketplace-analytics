@@ -53,11 +53,15 @@ CREATE DATABASE IF NOT EXISTS marketplace_marts;
 CREATE OR REPLACE VIEW marketplace_marts.customers AS
 SELECT
     *,
+    -- Словарь покрывает ровно ACQUISITION_CHANNELS из generate_data.py.
+    -- Канал, которого здесь нет, доезжал до дашборда сырым: 'social'
+    -- так и стоял латиницей среди русских подписей. ELSE оставлен на
+    -- случай, если в данных встретится значение старше словаря.
     CASE acquisition_channel
         WHEN 'telegram_ads'  THEN 'Реклама в Telegram'
         WHEN 'yandex_direct' THEN 'Яндекс.Директ'
         WHEN 'vk_ads'        THEN 'Реклама во ВКонтакте'
-        WHEN 'seo'           THEN 'Поисковый трафик'
+        WHEN 'social'        THEN 'Реклама в соцсетях'
         WHEN 'referral'      THEN 'Рекомендации'
         WHEN 'email'         THEN 'Email-рассылка'
         WHEN 'organic'       THEN 'Прямые заходы'
@@ -119,11 +123,16 @@ SELECT
         WHEN 'refunded' THEN 'Возмещён'
         ELSE status
     END AS status_ru,
+    -- Тот же список, что PAYMENT_METHODS в generate_data.py. Прежний
+    -- словарь переводил способы, которых в данных нет ('wallet',
+    -- 'installments'), и не переводил те, что есть: на графике стояли
+    -- «cash» и «mir_pay». Mir Pay остаётся латиницей — это имя сервиса,
+    -- а не слово.
     CASE payment_method
-        WHEN 'card'         THEN 'Банковская карта'
-        WHEN 'sbp'          THEN 'СБП'
-        WHEN 'wallet'       THEN 'Электронный кошелёк'
-        WHEN 'installments' THEN 'Рассрочка'
+        WHEN 'card'    THEN 'Банковская карта'
+        WHEN 'sbp'     THEN 'СБП'
+        WHEN 'mir_pay' THEN 'Mir Pay'
+        WHEN 'cash'    THEN 'Наличные'
         ELSE payment_method
     END AS payment_method_ru,
     -- Исход авторизации и последующий возврат — разные события, и
