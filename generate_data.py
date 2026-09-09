@@ -151,6 +151,79 @@ ACQUISITION_CHANNEL_NON_CONVERSION_MULTIPLIER = {
     "social": 1.4,
 }
 
+# Множитель к сумме заказа по городу покупателя.
+#
+# Без него сумма бралась из одного распределения на всех, и средний чек
+# по городам выходил одинаковым с точностью до шума выборки: 1957–2072 ₽
+# на ста днях данных, причём наверху оказывались маленькие города, где
+# заказов меньше и дрожание шире. Два чарта дашборда показывали «сигнала
+# нет» так, будто это вывод.
+#
+# Порядок величин — платёжеспособный спрос: в Москве и Петербурге корзина
+# заметно больше, в городах-миллионниках среднего размера — около
+# средней, дальше ниже. Это не данные Росстата, а правдоподобная форма:
+# важно, что разница между городами больше шума и устойчива.
+CITY_ORDER_AMOUNT_MULTIPLIER = {
+    "Москва": 1.22,
+    "Санкт-Петербург": 1.12,
+    "Екатеринбург": 1.02,
+    "Казань": 1.00,
+    "Новосибирск": 0.99,
+    "Нижний Новгород": 0.97,
+    "Краснодар": 0.96,
+    "Самара": 0.94,
+    "Ростов-на-Дону": 0.94,
+    "Уфа": 0.93,
+    "Челябинск": 0.92,
+    "Красноярск": 0.92,
+    "Пермь": 0.91,
+    "Воронеж": 0.90,
+    "Омск": 0.89,
+    "Волгоград": 0.88,
+}
+
+# Множитель к сумме заказа по каналу привлечения.
+#
+# Та же логика качества трафика, что в LOYALTY_MULTIPLIER, но про размер
+# корзины, а не про частоту: подписчик рассылки и пришедший по
+# рекомендации выбирают осознанно и берут больше, реклама в соцсетях
+# приводит импульсную покупку подешевле, поисковый спрос — посередине.
+ACQUISITION_CHANNEL_ORDER_AMOUNT_MULTIPLIER = {
+    "email": 1.14,
+    "referral": 1.09,
+    "yandex_direct": 1.04,
+    "organic": 1.00,
+    "vk_ads": 0.90,
+    "telegram_ads": 0.89,
+    "social": 0.87,
+}
+
+
+def _normalised(multipliers: dict[str, float], keys, weights) -> dict[str, float]:
+    """Приводит средний множитель к единице.
+
+    Иначе множители незаметно двигают средний чек по маркетплейсу
+    целиком: одна карточка на обзоре меняется от правки, которая должна
+    была развести города между собой, а не поднять всех разом.
+
+    Вес — доля соответствующей группы среди покупателей, та же, по
+    которой их и раздают.
+    """
+    total = sum(weights)
+    mean = sum(w * multipliers[k] for k, w in zip(keys, weights, strict=True)) / total
+    return {k: v / mean for k, v in multipliers.items()}
+
+
+CITY_ORDER_AMOUNT_MULTIPLIER = _normalised(
+    CITY_ORDER_AMOUNT_MULTIPLIER, CITIES, CITY_WEIGHTS
+)
+ACQUISITION_CHANNEL_ORDER_AMOUNT_MULTIPLIER = _normalised(
+    ACQUISITION_CHANNEL_ORDER_AMOUNT_MULTIPLIER,
+    ACQUISITION_CHANNELS,
+    ACQUISITION_CHANNEL_WEIGHTS,
+)
+
+
 PAYMENT_METHODS = ["card", "sbp", "mir_pay", "cash"]
 # apple_pay/google_pay не используются — NFC-платежи недоступны в РФ
 # с 2022, mir_pay — реальная российская NFC-альтернатива
@@ -1041,6 +1114,8 @@ def generate_customers(
 def generate_order_amounts(
     count: int,
     rng: np.random.Generator,
+    cities: pd.Series | None = None,
+    channels: pd.Series | None = None,
 ) -> np.ndarray:
     """
     Логнормальное распределение сумм заказов (большинство чеков небольшие,
@@ -1050,8 +1125,23 @@ def generate_order_amounts(
     mean=11.9, sigma=0.8 даёт медиану ~1475₽ и средний чек ~2000₽ —
     большинство заказов недорогие, но хвост уходит в крупную бытовую
     технику/электронику.
+
+    Город и канал покупателя масштабируют всё распределение целиком, а не
+    сдвигают его: корзина в Москве больше не на фиксированную сумму, а во
+    столько-то раз. Средний множитель равен единице, поэтому средний чек
+    по маркетплейсу остаётся тем же — меняется только его разброс между
+    городами и каналами. Без разрезов (аргументы опущены) поведение
+    прежнее.
     """
     raw = rng.lognormal(mean=11.9, sigma=0.8, size=count)
+    if cities is not None:
+        raw = raw * cities.map(CITY_ORDER_AMOUNT_MULTIPLIER).fillna(1.0).to_numpy()
+    if channels is not None:
+        raw = raw * (
+            channels.map(ACQUISITION_CHANNEL_ORDER_AMOUNT_MULTIPLIER)
+            .fillna(1.0)
+            .to_numpy()
+        )
     clipped = np.clip(raw, 15_000, 15_000_000)
     return clipped.astype(np.int64)
 
@@ -1187,7 +1277,12 @@ def generate_orders(
             "order_id": order_ids,
             "customer_id": chosen_customers["customer_id"].tolist(),
             "created_at": created_at,
-            "amount_kopecks": generate_order_amounts(count, rng),
+            "amount_kopecks": generate_order_amounts(
+                count,
+                rng,
+                cities=chosen_customers["city"],
+                channels=chosen_customers["acquisition_channel"],
+            ),
             "status": "new",
             "cancellation_reason": None,
             "payment_method": None,

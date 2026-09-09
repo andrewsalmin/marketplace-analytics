@@ -1410,3 +1410,108 @@ class TestFileHelpers:
         assert target.exists()
         reloaded = pd.read_csv(target)
         pd.testing.assert_frame_equal(df, reloaded)
+
+
+class TestOrderAmountMultipliers:
+    """Сумма заказа зависит от города и канала покупателя.
+
+    Без множителей она бралась из одного распределения на всех, и
+    средний чек по городам совпадал с точностью до шума выборки: на ста
+    днях данных разброс был 5,9% при том, что наверху оказывались
+    маленькие города, где заказов меньше и дрожание шире. Дашборд
+    показывал «сигнала нет» так, будто это вывод.
+    """
+
+    def test_every_city_has_a_multiplier(self):
+        assert set(gd.CITY_ORDER_AMOUNT_MULTIPLIER) == set(gd.CITIES)
+
+    def test_every_channel_has_a_multiplier(self):
+        assert set(gd.ACQUISITION_CHANNEL_ORDER_AMOUNT_MULTIPLIER) == set(
+            gd.ACQUISITION_CHANNELS
+        )
+
+    @pytest.mark.parametrize(
+        ("multipliers", "keys", "weights"),
+        [
+            ("CITY_ORDER_AMOUNT_MULTIPLIER", "CITIES", "CITY_WEIGHTS"),
+            (
+                "ACQUISITION_CHANNEL_ORDER_AMOUNT_MULTIPLIER",
+                "ACQUISITION_CHANNELS",
+                "ACQUISITION_CHANNEL_WEIGHTS",
+            ),
+        ],
+    )
+    def test_average_multiplier_is_one(self, multipliers, keys, weights):
+        """Разрезы разъезжаются между собой, а не тянут средний чек вверх."""
+        table = getattr(gd, multipliers)
+        names = getattr(gd, keys)
+        shares = getattr(gd, weights)
+        weighted = sum(
+            share * table[name] for name, share in zip(names, shares, strict=True)
+        )
+        assert weighted / sum(shares) == pytest.approx(1.0)
+
+    def test_amounts_scale_with_the_city(self):
+        rng = gd.make_rng(date(2026, 2, 1))
+        size = 20_000
+        cities = pd.Series(["Москва"] * size)
+        moscow = gd.generate_order_amounts(size, rng, cities=cities).mean()
+
+        rng = gd.make_rng(date(2026, 2, 1))
+        cities = pd.Series(["Волгоград"] * size)
+        volgograd = gd.generate_order_amounts(size, rng, cities=cities).mean()
+
+        expected = (
+            gd.CITY_ORDER_AMOUNT_MULTIPLIER["Москва"]
+            / gd.CITY_ORDER_AMOUNT_MULTIPLIER["Волгоград"]
+        )
+        assert moscow / volgograd == pytest.approx(expected, rel=0.02)
+
+    def test_amounts_scale_with_the_channel(self):
+        rng = gd.make_rng(date(2026, 2, 1))
+        size = 20_000
+        loyal = gd.generate_order_amounts(
+            size, rng, channels=pd.Series(["email"] * size)
+        ).mean()
+
+        rng = gd.make_rng(date(2026, 2, 1))
+        impulse = gd.generate_order_amounts(
+            size, rng, channels=pd.Series(["social"] * size)
+        ).mean()
+
+        expected = (
+            gd.ACQUISITION_CHANNEL_ORDER_AMOUNT_MULTIPLIER["email"]
+            / gd.ACQUISITION_CHANNEL_ORDER_AMOUNT_MULTIPLIER["social"]
+        )
+        assert loyal / impulse == pytest.approx(expected, rel=0.02)
+
+    def test_unknown_city_is_left_alone(self):
+        """Город не из справочника не должен трогать сумму заказа.
+
+        Сравнение именно с прогоном без разреза: множитель по умолчанию
+        обязан быть единицей, а не «каким-нибудь», — иначе появление в
+        данных нового города тихо сдвинуло бы по нему средний чек.
+        """
+        plain = gd.generate_order_amounts(500, gd.make_rng(date(2026, 2, 1)))
+        unknown = gd.generate_order_amounts(
+            500,
+            gd.make_rng(date(2026, 2, 1)),
+            cities=pd.Series(["Атлантида"] * 500),
+        )
+        assert (unknown == plain).all()
+
+    def test_orders_of_the_bigger_city_are_bigger(self, sample_customers):
+        """Множитель доезжает из справочника до самих заказов."""
+        customers = sample_customers.dropna(subset=["customer_id"]).copy()
+        rich = customers.assign(city="Москва")
+        poor = customers.assign(city="Волгоград")
+
+        args = dict(load_date=date(2026, 2, 1), count=8_000, error_rate=0.0)
+        moscow, _ = gd.generate_orders(
+            customers_df=rich, rng=gd.make_rng(date(2026, 2, 1)), **args
+        )
+        volgograd, _ = gd.generate_orders(
+            customers_df=poor, rng=gd.make_rng(date(2026, 2, 1)), **args
+        )
+
+        assert moscow["amount_kopecks"].mean() > volgograd["amount_kopecks"].mean()
