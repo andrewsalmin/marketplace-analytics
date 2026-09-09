@@ -533,6 +533,13 @@ def horizontal_bars(label: str) -> dict[str, Any]:
     }
 
 
+# Подпись оси стоит в 50 px от линии — столько же, сколько занимают
+# сами деления «100,0%» и «10,00%», поэтому на процентных осях подпись
+# и цифры сходились вплотную. Ступень 75 разводит их с запасом; шкалам
+# в штуках и рублях хватает и пятидесяти.
+WIDE_Y_TITLE = {"y_axis_title_margin": 75}
+
+
 # ---------------------------------------------------------------------------
 # Патчи витрин
 # ---------------------------------------------------------------------------
@@ -732,7 +739,12 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             # Без сглаживания: скользящее среднее доли усредняет дневные
             # доли, а не считает долю за неделю — день с тремя заказами
             # весил бы столько же, сколько день с тысячей.
-            "set": {"y_axis_format": ".1%", **DATE_AXIS},
+            "set": {
+                "y_axis_format": ".1%",
+                "y_axis_title": "Доля от числа заказов",
+                **DATE_AXIS,
+                **WIDE_Y_TITLE,
+            },
             "filters": [MATURE_FILTER],
         },
         "Изменение структуры статусов заказов": {
@@ -767,6 +779,10 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "y_axis_title": "Число клиентов",
                 "x_axis_sort": "days_to_first_order",
                 "x_axis_sort_asc": True,
+                # Подпись оси стояла вплотную к делениям и налезала на
+                # них: у повёрнутых на 45° чисел нижний край доходит
+                # почти до подписи.
+                "x_axis_title_margin": 30,
                 "row_limit": 200,
                 "time_grain_sqla": None,
                 # Ось числовая — это дни с регистрации, а не даты. На
@@ -872,6 +888,9 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 # оси, а не устройство пайплайна.
                 "metrics": [metric("Отклонённых строк", "SUM(quarantined_rows)")],
                 "y_axis_title": "Найдено ошибок",
+                # Подпись горизонтальной оси стояла в 15 px от цифр
+                # делений — вдвое ближе, чем на остальных графиках.
+                "y_axis_title_margin": 30,
                 **horizontal_bars("Отклонённых строк"),
             },
         },
@@ -1009,6 +1028,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "truncateYAxis": True,
                 "y_axis_bounds": [0.5, 1],
                 **DATE_AXIS,
+                **WIDE_Y_TITLE,
             },
         },
         "Тренд DQ-ошибок по сущностям": {
@@ -1024,6 +1044,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
                 "y_axis_format": ".2%",
                 "y_axis_title": "Доля отклонённых строк",
                 **DATE_AXIS,
+                **WIDE_Y_TITLE,
                 "annotation_layers": [
                     {
                         "name": "Порог 5%",
@@ -1160,7 +1181,7 @@ def chart_patches() -> dict[str, dict[str, Any]]:
             "dataset": "orders_with_customer_dim",
             "note": "P1-01 формат оси + P1-11 заголовок",
             "slice_name": "Динамика суммы рефандов",
-            "set": DATE_AXIS,
+            "set": {**DATE_AXIS, **WIDE_Y_TITLE},
         },
         # ---------------- P2 ----------------
         "Способы оплаты и статус": {
