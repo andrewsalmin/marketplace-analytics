@@ -17,17 +17,20 @@
 # вводом. В аргументах командной строки он не передаётся: оттуда он
 # попадает и в историю оболочки, и в список процессов.
 #
-# ВАЖНО про возобновление: в отличие от backfill_history.sh, здесь три
-# стадии на день, и упасть может любая из трёх. RESUME_FROM_DAY
-# перезапускает ВСЕ ТРИ стадии для указанного дня заново —
-# ingest_csv_to_raw.py упадёт с "партиция уже существует", если для
-# этого дня он уже успешно отработал раньше (значит, возобновление —
-# со СЛЕДУЮЩЕГО дня, а не с текущего). load_to_clickhouse.py, в отличие
-# от ingest, идемпотентен сам по себе (см. _load_commits в
-# clickhouse_schema.sql) — повторный вызов для уже загруженного дня
-# безопасный no-op, руками ничего "долечивать" не нужно. Если нужно
-# принудительно перезаписать день в ClickHouse, нужно вызвать
-# load_to_clickhouse.py с --force-reload отдельно.
+# Возобновление после сбоя — с того дня, на котором он произошёл:
+# RESUME_FROM_DAY повторяет день целиком, и каждая стадия это выдерживает.
+# - ingest_csv_to_raw.py перезапись запрещает, поэтому для дня с манифестом
+#   ingest (raw/_manifests/load_date=.../ingest_manifest.json) он
+#   пропускается. Манифест пишется последним, после всех трёх сущностей.
+# - transform.py перезаписывает свои партиции за день.
+# - load_to_clickhouse.py для загруженного дня — no-op, а недогруженный
+#   перед загрузкой очищает (prepare_load_date).
+# Исключение — ingest, упавший посреди записи: raw-партиции части сущностей
+# уже есть, а манифеста нет. Такой день чинится руками: удалить
+# data/raw/*/load_date=<день> и запустить скрипт с этого дня.
+#
+# Принудительно перезаписать день в ClickHouse — отдельным вызовом
+# load_to_clickhouse.py с --force-reload.
 set -euo pipefail
 
 DATA_DIR="./data"
@@ -85,9 +88,14 @@ for i in $(seq 0 $((DAYS - 1))); do
   load_date=$(date -d "${START_DATE} + ${i} days" +%F)
   echo "=== ${load_date} (день ${day_number}/${DAYS}) ==="
 
-  python ingest_csv_to_raw.py \
-    --load-date "${load_date}" \
-    --data-dir "${DATA_DIR}"
+  ingest_manifest="${DATA_DIR}/raw/_manifests/load_date=${load_date}/ingest_manifest.json"
+  if [ -f "${ingest_manifest}" ]; then
+    echo "ingest за ${load_date} уже выполнен (${ingest_manifest}), пропускаю"
+  else
+    python ingest_csv_to_raw.py \
+      --load-date "${load_date}" \
+      --data-dir "${DATA_DIR}"
+  fi
 
   python transform.py \
     --load-date "${load_date}" \
