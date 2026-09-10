@@ -45,7 +45,7 @@ shoot() {
     local size=0
 
     # Три попытки: фронтенд Superset изредка не дотягивает один из своих
-    #JS-чанков и рисует вместо дашборда «ChunkLoadError». Со второго
+    # JS-чанков и рисует вместо дашборда «ChunkLoadError». Со второго
     # раза загружается.
     for _ in 1 2 3; do
         google-chrome --headless --disable-gpu --no-sandbox --hide-scrollbars \
