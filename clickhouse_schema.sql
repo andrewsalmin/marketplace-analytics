@@ -7,12 +7,14 @@
 -- поэтому SELECT обязан использовать FINAL или argMax(..., load_date).
 -- quarantine_*/dq_metrics — обычный MergeTree, не переиздаются.
 --
--- Версия строки — load_date, а не ingested_at. Время загрузки в этой
--- роли означало «свежее то, что залито позже», и одного перезалитого
--- старого дня хватало, чтобы он оказался свежее всех последующих:
--- FINAL начинал отдавать состояние заказа на тот день вместо нынешнего.
--- Дата загрузки говорит то же самое о данных, а не о процессе, и от
--- порядка перезаливки не зависит вовсе.
+-- Версия строки — load_date. Раньше эту роль играл ingested_at, время
+-- записи строки: он означал «свежее то, что залито позже», и одного
+-- перезалитого старого дня хватало, чтобы он оказался свежее всех
+-- последующих — FINAL начинал отдавать состояние заказа на тот день
+-- вместо нынешнего. Дата загрузки говорит то же самое о данных, а не о
+-- процессе, и от порядка перезаливки не зависит вовсе. Самой колонки
+-- ingested_at больше нет: без этой роли её никто не читал, а когда
+-- какой день приехал, помнит _load_commits.
 --
 -- На уже поднятом кластере смена движка сама не произойдёт: DDL здесь
 -- весь через CREATE TABLE IF NOT EXISTS. Существующие таблицы нужно
@@ -28,10 +30,7 @@ CREATE TABLE IF NOT EXISTS marketplace_analytics.customers
     city                LowCardinality(String),
     acquisition_channel LowCardinality(String),
     email               String,
-    load_date           Date,
-    -- Не версия строки, а отметка о загрузке: пригождается, когда
-    -- нужно понять, когда именно строка приехала.
-    ingested_at         DateTime64(3) DEFAULT now64(3)
+    load_date           Date
 )
 ENGINE = ReplacingMergeTree(load_date)
 PARTITION BY load_date
@@ -53,10 +52,7 @@ CREATE TABLE IF NOT EXISTS marketplace_analytics.orders
     cancelled_at        Nullable(DateTime),
     returned_at         Nullable(DateTime),
     refunded_at         Nullable(DateTime),
-    load_date           Date,
-    -- Не версия строки, а отметка о загрузке: пригождается, когда
-    -- нужно понять, когда именно строка приехала.
-    ingested_at         DateTime64(3) DEFAULT now64(3)
+    load_date           Date
 )
 ENGINE = ReplacingMergeTree(load_date)
 PARTITION BY load_date
@@ -74,9 +70,7 @@ CREATE TABLE IF NOT EXISTS marketplace_analytics.payments
     amount_kopecks Int64,
     payment_method LowCardinality(String),
     status         LowCardinality(String),
-    load_date      Date,
-    -- Не версия строки, а отметка о загрузке, см. выше.
-    ingested_at    DateTime64(3) DEFAULT now64(3)
+    load_date      Date
 )
 ENGINE = ReplacingMergeTree(load_date)
 PARTITION BY load_date
