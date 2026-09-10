@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: Линтер и тесты генератора
+    name: Линтер и тесты без Spark
     runs-on: ubuntu-latest
 
     steps:
@@ -40,14 +40,18 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
-      # Тесты DQ-правил и маркера загрузки здесь пропускаются: pyspark в
-      # этот job не ставится (см. job dq-rules), а оба модуля начинаются
-      # с pytest.importorskip.
+      # Тесты, которым нужен pyspark (DQ-правила, маркер загрузки), здесь
+      # пропускаются через pytest.importorskip и выполняются в job spark.
       - name: Run tests
         run: pytest -v
 
-  dq-rules:
-    name: DQ-правила на Spark
+  # Весь набор, а не список файлов. Список уже отставал: тесты маркера
+  # загрузки без pyspark пропускались в job test, а сюда не попадали и не
+  # выполнялись нигде. Тесты генератора идут в обоих job'ах — это секунды,
+  # а не повод вести список вручную. Тесты Superset здесь пропускаются
+  # (requests не ставится) и выполняются в job test.
+  spark:
+    name: Тесты на Spark
     runs-on: ubuntu-latest
 
     steps:
@@ -75,5 +79,5 @@ jobs:
       - name: Install the project
         run: pip install -e . --no-deps
 
-      - name: Run DQ rule tests
-        run: pytest tests/test_transform_dq.py -v
+      - name: Run tests with Spark
+        run: pytest -v
