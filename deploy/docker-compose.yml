@@ -1,0 +1,86 @@
+# На сервере стенда: /opt/superset/docker-compose.yml
+# Рядом с ним лежат Dockerfile и superset_config.py из этого же каталога.
+#
+# Каталог ./secrets в репозиторий не попадает и не должен: там пароль
+# postgres и SECRET_KEY самого Superset. Поднимая стенд заново, их надо
+# создать самому — два файла со случайными строками:
+#
+#     mkdir -p /opt/superset/secrets && chmod 700 /opt/superset/secrets
+#     openssl rand -base64 72 | tr -d '
+' > /opt/superset/secrets/postgres_password
+#     openssl rand -base64 72 | tr -d '
+' > /opt/superset/secrets/superset_secret_key
+#
+# Права 644 внутри каталога 700 намеренно: внутрь каталога снаружи не
+# войти, а файлы читают два процесса в контейнерах под разными uid.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: superset-postgres
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      POSTGRES_DB: superset
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    command:
+      [
+        "postgres",
+        "-p", "5433",
+        "-c", "listen_addresses=127.0.0.1"
+      ]
+    volumes:
+      - superset_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: superset-redis
+    restart: unless-stopped
+    network_mode: host
+    command:
+      [
+        "redis-server",
+        "--bind", "127.0.0.1",
+        "--port", "6380",
+        "--protected-mode", "yes"
+      ]
+
+  superset:
+    build: .
+    container_name: superset
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+    secrets:
+      - postgres_password
+      - superset_secret_key
+    volumes:
+      - ./superset_config.py:/app/pythonpath/superset_config.py:ro
+    command: >
+      gunicorn
+      --bind 127.0.0.1:8088
+      --workers 4
+      --worker-class gthread
+      --threads 8
+      --timeout 120
+      "superset.app:create_app()"
+
+volumes:
+  superset_postgres_data:
+
+# Секреты файлами, а не переменными окружения. Переменные видны в
+# docker inspect любому, у кого есть доступ к докеру, попадают в
+# /proc/<pid>/environ и утекают в вывод, который люди вставляют в
+# переписку не глядя. Файл читает только процесс, которому он нужен.
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  superset_secret_key:
+    file: ./secrets/superset_secret_key
