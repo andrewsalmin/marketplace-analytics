@@ -3,9 +3,21 @@
 -- т.к. DROP PARTITION требует совпадения PARTITION BY).
 --
 -- customers/orders/payments переиздаются по мере продвижения state
--- machine (см. README.md) через ReplacingMergeTree(ingested_at) —
--- поэтому SELECT обязан использовать FINAL или argMax(..., ingested_at).
+-- machine (см. README.md) через ReplacingMergeTree(load_date) —
+-- поэтому SELECT обязан использовать FINAL или argMax(..., load_date).
 -- quarantine_*/dq_metrics — обычный MergeTree, не переиздаются.
+--
+-- Версия строки — load_date, а не ingested_at. Время загрузки в этой
+-- роли означало «свежее то, что залито позже», и одного перезалитого
+-- старого дня хватало, чтобы он оказался свежее всех последующих:
+-- FINAL начинал отдавать состояние заказа на тот день вместо нынешнего.
+-- Дата загрузки говорит то же самое о данных, а не о процессе, и от
+-- порядка перезаливки не зависит вовсе.
+--
+-- На уже поднятом кластере смена движка сама не произойдёт: DDL здесь
+-- весь через CREATE TABLE IF NOT EXISTS. Существующие таблицы нужно
+-- пересоздать и перелить — INSERT ... SELECT в таблицу с новым движком
+-- и RENAME на её место.
 
 CREATE DATABASE IF NOT EXISTS marketplace_analytics;
 
@@ -17,9 +29,11 @@ CREATE TABLE IF NOT EXISTS marketplace_analytics.customers
     acquisition_channel LowCardinality(String),
     email               String,
     load_date           Date,
+    -- Не версия строки, а отметка о загрузке: пригождается, когда
+    -- нужно понять, когда именно строка приехала.
     ingested_at         DateTime64(3) DEFAULT now64(3)
 )
-ENGINE = ReplacingMergeTree(ingested_at)
+ENGINE = ReplacingMergeTree(load_date)
 PARTITION BY load_date
 ORDER BY (customer_id);
 
@@ -40,9 +54,11 @@ CREATE TABLE IF NOT EXISTS marketplace_analytics.orders
     returned_at         Nullable(DateTime),
     refunded_at         Nullable(DateTime),
     load_date           Date,
+    -- Не версия строки, а отметка о загрузке: пригождается, когда
+    -- нужно понять, когда именно строка приехала.
     ingested_at         DateTime64(3) DEFAULT now64(3)
 )
-ENGINE = ReplacingMergeTree(ingested_at)
+ENGINE = ReplacingMergeTree(load_date)
 PARTITION BY load_date
 -- Ключ синхронизирован с README.md ("Запросы к ClickHouse: FINAL
 -- обязателен") — created_at/customer_id у заказа не меняются, order_id
@@ -59,9 +75,10 @@ CREATE TABLE IF NOT EXISTS marketplace_analytics.payments
     payment_method LowCardinality(String),
     status         LowCardinality(String),
     load_date      Date,
+    -- Не версия строки, а отметка о загрузке, см. выше.
     ingested_at    DateTime64(3) DEFAULT now64(3)
 )
-ENGINE = ReplacingMergeTree(ingested_at)
+ENGINE = ReplacingMergeTree(load_date)
 PARTITION BY load_date
 -- payment_id переиздаётся при рефанде (generate_data.py:
 -- _build_refund_payment_row переиспользует pay_{order_id}) — ключ на

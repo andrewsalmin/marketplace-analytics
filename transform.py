@@ -413,7 +413,7 @@ def transform_orders(spark, raw_root, clean_root, quarantine_root, load_date):
     # Дубликат order_id проверяется только В ПРЕДЕЛАХ ОДНОГО батча:
     # заказ легитимно переиздаётся с тем же order_id при каждой смене
     # статуса (upsert-модель, версии разрешает ReplacingMergeTree по
-    # ingested_at). А вот две строки с одним order_id внутри одного
+    # load_date). А вот две строки с одним order_id внутри одного
     # снапшота — DQ-проблема источника.
     duplicate_window = Window.partitionBy("order_id")
 
