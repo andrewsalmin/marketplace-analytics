@@ -6,10 +6,8 @@
 # создать самому — два файла со случайными строками:
 #
 #     mkdir -p /opt/superset/secrets && chmod 700 /opt/superset/secrets
-#     openssl rand -base64 72 | tr -d '
-' > /opt/superset/secrets/postgres_password
-#     openssl rand -base64 72 | tr -d '
-' > /opt/superset/secrets/superset_secret_key
+#     openssl rand -base64 72 | tr -d '\n' > /opt/superset/secrets/postgres_password
+#     openssl rand -base64 72 | tr -d '\n' > /opt/superset/secrets/superset_secret_key
 #
 # Права 644 внутри каталога 700 намеренно: внутрь каталога снаружи не
 # войти, а файлы читают два процесса в контейнерах под разными uid.
