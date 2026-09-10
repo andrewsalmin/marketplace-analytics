@@ -1,65 +1,72 @@
 #!/usr/bin/env bash
 #
-# Пересъёмка скриншотов для README.
+# Пересъёмка снимков дашборда для README.
 #
-# Данные прирастают каждую ночь, поэтому картинки показывают всё более
-# старое состояние. Обновлять их по расписанию не стоит: ежедневный
-# коммит двух PNG за год добавит репозиторию сотню мегабайт и триста
-# коммитов, в которых утонет настоящая история. Поэтому — руками, перед
-# тем как показывать проект:
+# Снимки не лежат в репозитории, а отдаются с сервера стенда: README
+# ссылается на них по адресу, а не на файл. Причина в том, что данные
+# прирастают каждую ночь, и закоммиченная картинка показывает всё более
+# старое состояние — а ежедневный коммит двух PNG за год добавил бы
+# репозиторию под сотню мегабайт и три сотни коммитов, в которых
+# утонула бы настоящая история.
+#
+# Скрипт зовёт ночная задача (см. dags/daily_marketplace_pipeline.py)
+# сразу после обновления дашборда, поэтому на снимке всегда сегодняшние
+# числа. Руками он тоже запускается — на сервере стенда:
 #
 #     docs/refresh_screenshots.sh
-#     git add docs/*.png && git commit -m "docs: refresh dashboard screenshots"
 #
-# Съёмка идёт на сервере стенда, а не на рабочей машине. Причина
-# прозаическая: там стоит Chrome, который headless умеет, а Edge на
-# Windows в этом режиме падает, не создавая файла. Снимки копируются
-# обратно, коммит делается здесь.
-#
-# Адрес сервера — публичное имя дашборда, то же, что в README. Хост
-# можно переопределить: SCREENSHOT_HOST=user@example.com docs/refresh_screenshots.sh
+# Оговорка, которую стоит помнить: картинки в README живут ровно
+# столько, сколько живёт стенд. Если стенд когда-нибудь погасят, README
+# останется без иллюстраций, и их придётся положить в репозиторий
+# файлами.
 set -euo pipefail
 
-REMOTE="${SCREENSHOT_HOST:-andrewsalmin@marketplace-analytics.andrewsalmin.com}"
+OUT_DIR="${SCREENSHOT_DIR:-/var/www/marketplace-shots}"
 BASE_URL="${SCREENSHOT_URL:-https://marketplace-analytics.andrewsalmin.com}"
 DASHBOARD="superset/dashboard/marketplace-overview"
-OUT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REMOTE_DIR="/tmp/marketplace-shots"
 
-# Снимается публичный адрес, а не localhost: важно увидеть ровно то, что
-# увидит посетитель — вместе с обратным прокси и сертификатом.
-#
 # 90 секунд виртуального времени не «на всякий случай»: на сорока пяти
 # графики успевают, а блок выводов остаётся пустым провалом — markdown
 # отрисовывается позже данных.
-shoot_remote() {
-    local name="$1" anchor="$2" height="$3"
-    ssh "$REMOTE" "mkdir -p '$REMOTE_DIR' && google-chrome \
-        --headless --disable-gpu --no-sandbox --hide-scrollbars \
-        --window-size='1600,$height' \
-        --virtual-time-budget=90000 \
-        --screenshot='$REMOTE_DIR/$name.png' \
-        '$BASE_URL/$DASHBOARD/$anchor'" >/dev/null 2>&1
-    scp -q "$REMOTE:$REMOTE_DIR/$name.png" "$OUT_DIR/$name.png"
+BUDGET_MS=90000
 
-    local size
-    size=$(wc -c < "$OUT_DIR/$name.png")
-    # Пустая или не отрисовавшаяся страница весит килобайты, настоящий
-    # снимок — сотни. Проверка грубая, но ловит именно тот случай, ради
-    # которого всё и затевалось: картинку без содержимого.
-    if [ "$size" -lt 50000 ]; then
-        echo "  ! $name.png весит $size Б — похоже, страница не отрисовалась" >&2
+# Пустая или не отрисовавшаяся страница весит килобайты, настоящий
+# снимок — сотни. Порог грубый, но ловит именно тот случай, ради
+# которого всё и затевалось: картинку без содержимого.
+MIN_BYTES=50000
+
+# Снимается публичный адрес, а не localhost: важно увидеть ровно то,
+# что увидит посетитель, — вместе с обратным прокси и сертификатом.
+shoot() {
+    local name="$1" anchor="$2" height="$3"
+    local tmp="$OUT_DIR/.$name.png.tmp"
+    local size=0
+
+    # Три попытки: фронтенд Superset изредка не дотягивает один из своих
+    #JS-чанков и рисует вместо дашборда «ChunkLoadError». Со второго
+    # раза загружается.
+    for _ in 1 2 3; do
+        google-chrome --headless --disable-gpu --no-sandbox --hide-scrollbars \
+            --window-size="1600,$height" \
+            --virtual-time-budget="$BUDGET_MS" \
+            --screenshot="$tmp" \
+            "$BASE_URL/$DASHBOARD/$anchor" >/dev/null 2>&1 || true
+        size=$(wc -c < "$tmp" 2>/dev/null || echo 0)
+        [ "$size" -ge "$MIN_BYTES" ] && break
+    done
+
+    if [ "$size" -lt "$MIN_BYTES" ]; then
+        rm -f "$tmp"
+        echo "  ! $name.png весит $size Б — страница не отрисовалась" >&2
         return 1
     fi
+
+    # Подмена одним движением: иначе посетитель README успеет застать
+    # файл наполовину записанным.
+    mv "$tmp" "$OUT_DIR/$name.png"
     printf '  %-14s %8s Б\n' "$name.png" "$size"
 }
 
-echo "Снимаю $BASE_URL (через $REMOTE)"
-shoot_remote overview "" 1400
-shoot_remote dq "#TAB-dq" 900
-ssh "$REMOTE" "rm -rf '$REMOTE_DIR'" >/dev/null 2>&1 || true
-
-echo
-echo "Готово. Посмотри картинки глазами — проверка по весу ловит только"
-echo "пустую страницу, но не наполовину прогрузившуюся. Затем:"
-echo "  git add docs/*.png && git commit -m 'docs: refresh dashboard screenshots'"
+echo "Снимаю $BASE_URL в $OUT_DIR"
+shoot overview "" 1400
+shoot dq "#TAB-dq" 900

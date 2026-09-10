@@ -8,7 +8,7 @@
 **Живой дашборд: [andrewsalmin.com/marketplace-analytics](https://andrewsalmin.com/marketplace-analytics)**
 — открывается без регистрации.
 
-[![Обзорный экран дашборда](docs/overview.png)](https://andrewsalmin.com/marketplace-analytics)
+[![Обзорный экран дашборда](https://marketplace-analytics.andrewsalmin.com/shots/overview.png)](https://andrewsalmin.com/marketplace-analytics)
 
 **Задача.** У маркетплейса с доставкой через пункты выдачи есть учётная
 система, которая каждую ночь выгружает покупателей, заказы и платежи.
@@ -40,7 +40,7 @@ pytest · GitHub Actions.
 ошибок: видно и долю отбракованных строк по дням с порогом, и из чего
 она складывается.
 
-![Вкладка «Качество данных»](docs/dq.png)
+![Вкладка «Качество данных»](https://marketplace-analytics.andrewsalmin.com/shots/dq.png)
 
 ## Словарь метрик
 

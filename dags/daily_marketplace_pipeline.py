@@ -315,6 +315,17 @@ def daily_marketplace_pipeline():
             env={"CLICKHOUSE_PASSWORD": password},
         )
 
+    # Снимки для README — после обновления дашборда, а не до: на них
+    # должен попасть уже пересчитанный блок выводов.
+    #
+    # depends_on_past=False по той же причине, что и у обновления
+    # дашборда: одна неудачная ночь не должна замораживать картинку
+    # навсегда. Падение съёмки к тому же ничего не ломает — README
+    # покажет вчерашний снимок.
+    @task(retries=1, depends_on_past=False, execution_timeout=timedelta(minutes=15))
+    def refresh_screenshots() -> None:
+        _run(["bash", "docs/refresh_screenshots.sh"])
+
     (
         generate(ds="{{ ds }}")
         >> ingest(ds="{{ ds }}")
@@ -322,6 +333,7 @@ def daily_marketplace_pipeline():
         >> load(ds="{{ ds }}")
         >> verify()
         >> refresh_dashboard()
+        >> refresh_screenshots()
     )
 
 
