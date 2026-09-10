@@ -39,7 +39,9 @@ MIN_BYTES=50000
 # что увидит посетитель, — вместе с обратным прокси и сертификатом.
 shoot() {
     local name="$1" anchor="$2" height="$3"
-    local tmp="$OUT_DIR/.$name.png.tmp"
+    # Имя обязано оканчиваться на .png: по расширению Chrome выбирает
+    # формат, а при незнакомом молча не пишет ничего.
+    local tmp="$OUT_DIR/.$name.new.png"
     local size=0
 
     # Три попытки: фронтенд Superset изредка не дотягивает один из своих
@@ -51,7 +53,7 @@ shoot() {
             --virtual-time-budget="$BUDGET_MS" \
             --screenshot="$tmp" \
             "$BASE_URL/$DASHBOARD/$anchor" >/dev/null 2>&1 || true
-        size=$(wc -c < "$tmp" 2>/dev/null || echo 0)
+        size=$([ -f "$tmp" ] && wc -c < "$tmp" || echo 0)
         [ "$size" -ge "$MIN_BYTES" ] && break
     done
 
