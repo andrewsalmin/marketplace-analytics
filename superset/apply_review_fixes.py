@@ -170,6 +170,35 @@ NOT_CANCELLED = (
 
 CREDENTIALS_PATH = pathlib.Path.home() / ".superset" / "credentials.json"
 
+BACKUP_GLOB = "superset_backup_*.zip"
+
+# Сколько бэкапов дашборда оставлять.
+#
+# Бэкап снимается перед каждой записью, а пишет и ночная задача — то
+# есть файл прибавляется каждые сутки и не удаляется никогда. За неделю
+# их набралось полсотни, за год набралось бы под четыреста.
+#
+# Десять — это откат на десять последних правок. Дальше в прошлое
+# откатываться нечем и незачем: дашборд собирается этим же скриптом, и
+# любое его состояние воспроизводится прогоном нужной версии кода.
+BACKUPS_KEPT = 10
+
+
+def prune_backups(directory: pathlib.Path, keep: int = BACKUPS_KEPT) -> list[str]:
+    """Оставляет только `keep` последних бэкапов, остальные удаляет.
+
+    Сортировка по имени, а не по времени файла: в имени стоит отметка
+    вида 20260909T142530Z, которая как строка сортируется в том же
+    порядке, что и как время. Время файла пережило бы не всякое
+    копирование, а имя переживёт.
+    """
+    backups = sorted(directory.glob(BACKUP_GLOB))
+    removed = []
+    for stale in backups[:-keep] if keep else backups:
+        stale.unlink()
+        removed.append(stale.name)
+    return removed
+
 
 def load_credentials(path: pathlib.Path) -> dict[str, str]:
     """Читает url/username/password из файла, если он есть.
@@ -2838,7 +2867,11 @@ def main() -> int:
         backup = client.export_dashboard(
             args.dashboard, f"superset_backup_{stamp}.zip"
         )
-        print(f"Бэкап дашборда: {backup}\n")
+        print(f"Бэкап дашборда: {backup}")
+        dropped = prune_backups(pathlib.Path(backup).resolve().parent)
+        if dropped:
+            print(f"Удалено старых бэкапов: {len(dropped)}")
+        print()
 
     mode = "ПРИМЕНЕНИЕ" if args.apply else "ПЛАН (ничего не пишется)"
     print(f"{mode} · фазы: {', '.join(sorted(phases))}\n")

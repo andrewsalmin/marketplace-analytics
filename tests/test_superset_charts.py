@@ -680,3 +680,67 @@ class TestDatasetColumns:
         runner.sync_dataset_columns({"p0"})
 
         assert runner.client.written == []
+
+
+class TestPruneBackups:
+    """Бэкап снимается перед каждой записью, в том числе ночной.
+
+    То есть файл прибавляется каждые сутки, и без уборки их число растёт
+    без предела — за первую неделю набралось полсотни.
+    """
+
+    def _make(self, tmp_path, stamps):
+        for stamp in stamps:
+            (tmp_path / f"superset_backup_{stamp}.zip").write_bytes(b"zip")
+        return tmp_path
+
+    def test_only_the_newest_survive(self, tmp_path):
+        stamps = [f"2026090{d}T120000Z" for d in range(1, 8)]
+        self._make(tmp_path, stamps)
+
+        removed = arf.prune_backups(tmp_path, keep=3)
+
+        left = sorted(p.name for p in tmp_path.glob(arf.BACKUP_GLOB))
+        assert left == [f"superset_backup_{s}.zip" for s in stamps[-3:]]
+        assert len(removed) == 4
+
+    def test_fewer_than_the_limit_are_left_alone(self, tmp_path):
+        stamps = ["20260901T120000Z", "20260902T120000Z"]
+        self._make(tmp_path, stamps)
+
+        assert arf.prune_backups(tmp_path, keep=10) == []
+        assert len(list(tmp_path.glob(arf.BACKUP_GLOB))) == 2
+
+    def test_order_comes_from_the_stamp_not_from_the_filesystem(
+        self, tmp_path, monkeypatch
+    ):
+        """Порядок обязан задавать сам скрипт, а не glob.
+
+        Проверять это на настоящем каталоге бесполезно: glob на обычной
+        файловой системе и так отдаёт имена по алфавиту, поэтому уборка
+        выглядела бы верной и без сортировки. Здесь glob намеренно
+        отдаёт их вперемешку.
+        """
+        stamps = ["20260101T000000Z", "20260615T000000Z", "20261231T000000Z"]
+        self._make(tmp_path, stamps)
+        jumbled = [
+            tmp_path / f"superset_backup_{s}.zip"
+            for s in (stamps[1], stamps[2], stamps[0])
+        ]
+        monkeypatch.setattr(
+            arf.pathlib.Path, "glob", lambda self, pattern: iter(jumbled)
+        )
+
+        arf.prune_backups(tmp_path, keep=1)
+
+        left = sorted(path.name for path in tmp_path.iterdir())
+        assert left == ["superset_backup_20261231T000000Z.zip"]
+
+    def test_nothing_else_in_the_directory_is_touched(self, tmp_path):
+        self._make(tmp_path, ["20260901T120000Z", "20260902T120000Z"])
+        keep = tmp_path / "clickhouse_marts.sql"
+        keep.write_text("SELECT 1", encoding="utf-8")
+
+        arf.prune_backups(tmp_path, keep=1)
+
+        assert keep.exists(), "уборка бэкапов не должна трогать ничего больше"
