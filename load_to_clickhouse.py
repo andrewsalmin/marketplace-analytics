@@ -12,8 +12,9 @@ from clickhouse_ddl import ch_execute, ensure_marts, ensure_schema
 
 logger = logging.getLogger(__name__)
 
-# Все таблицы, партиционированные по load_date (см. clickhouse_schema.sql) —
-# именно этот список чистится через DROP PARTITION при --force-reload.
+# Таблицы с данными дня, партиционированные по load_date (см.
+# clickhouse_schema.sql). Этот список чистится через DROP PARTITION перед
+# каждой загрузкой дня — см. prepare_load_date().
 PARTITIONED_TABLES = [
     "customers",
     "orders",
@@ -23,6 +24,10 @@ PARTITIONED_TABLES = [
     "quarantine_payments",
     "dq_metrics",
 ]
+
+# Маркер «день загружен целиком». Тоже партиционирован по load_date, но
+# чистится отдельно и первым — см. drop_existing_partitions().
+COMMITS_TABLE = "_load_commits"
 
 
 def _load_json_config(name: str) -> dict:
@@ -93,13 +98,12 @@ def parse_args() -> argparse.Namespace:
         "--force-reload",
         action="store_true",
         help=(
-            "Перезагрузить load_date, даже если он уже отмечен как "
-            "загруженный в _load_commits: перед загрузкой выполняется "
-            "DROP PARTITION по всем партиционированным таблицам за эту "
-            "дату. Без флага повторный запуск для уже загруженного "
-            "load_date — безопасный no-op (см. is_load_date_committed). "
-            "Порядок перезаливки значения не имеет: версия строки в "
-            "ReplacingMergeTree — load_date, а не время загрузки."
+            "Перезагрузить load_date, уже отмеченный как загруженный в "
+            "_load_commits. Без флага повторный запуск для такого дня — "
+            "no-op. Партиции дня удаляются перед любой загрузкой, с "
+            "флагом и без (см. prepare_load_date). Порядок перезаливки "
+            "значения не имеет: версия строки в ReplacingMergeTree — "
+            "load_date, а не время загрузки."
         ),
     )
 
@@ -138,14 +142,20 @@ def parse_args() -> argparse.Namespace:
 def is_load_date_committed(args) -> bool:
     result = ch_execute(
         args,
-        "SELECT count() FROM _load_commits WHERE load_date = "
+        f"SELECT count() FROM {COMMITS_TABLE} WHERE load_date = "
         f"'{args.load_date}'",
     )
     return int(result.strip()) > 0
 
 
 def drop_existing_partitions(args) -> None:
-    for table in PARTITIONED_TABLES:
+    """Удаляет из хранилища всё, что записано за load_date, и маркер дня.
+
+    Маркер удаляется первым. В обратном порядке сбой посреди удаления
+    оставил бы день отмеченным как загруженный, но без данных, и
+    следующий запуск пропустил бы его как готовый.
+    """
+    for table in [COMMITS_TABLE, *PARTITIONED_TABLES]:
         # Без IF EXISTS: у DROP PARTITION такого модификатора нет, и
         # запрос падал с синтаксической ошибкой — то есть --force-reload
         # не работал вовсе. Он и не нужен: ClickHouse молча ничего не
@@ -157,10 +167,38 @@ def drop_existing_partitions(args) -> None:
         )
 
     logger.info(
-        "[RELOAD] Dropped load_date=%s partitions across %d tables.",
+        "[CLEAN] Dropped load_date=%s partitions across %d tables.",
         args.load_date,
-        len(PARTITIONED_TABLES),
+        len(PARTITIONED_TABLES) + 1,
     )
+
+
+def prepare_load_date(args) -> bool:
+    """Решает, загружать ли день, и очищает для загрузки его партиции.
+
+    Возвращает False, если день уже отмечен в _load_commits, а
+    --force-reload не передан: загружать нечего.
+
+    В остальных случаях партиции дня удаляются, и не только при
+    --force-reload. День без маркера — это день, загрузка которого не
+    дошла до конца, и часть таблиц за него уже может быть записана. В
+    customers/orders/payments повтор разрешил бы FINAL, но quarantine_* и
+    dq_metrics — обычный MergeTree: повторная запись задвоила бы
+    отклонённые строки и завысила долю брака за день. Для дня, который
+    ещё не загружался, удаление ничего не меняет: отсутствующую партицию
+    ClickHouse пропускает молча.
+    """
+    if is_load_date_committed(args) and not args.force_reload:
+        logger.info(
+            "[SKIP] load_date=%s is already loaded into ClickHouse "
+            "(see _load_commits); nothing to do. Pass --force-reload "
+            "to overwrite this day.",
+            args.load_date,
+        )
+        return False
+
+    drop_existing_partitions(args)
+    return True
 
 
 def record_commit(args, entity_counts: dict[str, int]) -> None:
@@ -178,7 +216,7 @@ def record_commit(args, entity_counts: dict[str, int]) -> None:
 
     ch_execute(
         args,
-        "INSERT INTO _load_commits (load_date, entity, rows) VALUES "
+        f"INSERT INTO {COMMITS_TABLE} (load_date, entity, rows) VALUES "
         f"{values}",
     )
 
@@ -223,17 +261,8 @@ def main() -> None:
     ensure_schema(args)
     ensure_marts(args)
 
-    if is_load_date_committed(args):
-        if not args.force_reload:
-            logger.info(
-                "[SKIP] load_date=%s is already loaded into ClickHouse "
-                "(see _load_commits); nothing to do. Pass --force-reload "
-                "to overwrite this day.",
-                args.load_date,
-            )
-            return
-
-        drop_existing_partitions(args)
+    if not prepare_load_date(args):
+        return
 
     spark = (
         SparkSession.builder

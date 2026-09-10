@@ -239,8 +239,9 @@ def daily_marketplace_pipeline():
             "--data-dir", DATA_DIR,
         ])
 
-    # Повтор безопасен: маркер _load_commits пишется последним, и уже
-    # загруженный день превращается в no-op (is_load_date_committed).
+    # Повтор безопасен: маркер _load_commits пишется последним, уже
+    # загруженный день превращается в no-op, а недогруженный перед повтором
+    # очищается (prepare_load_date).
     @task(execution_timeout=timedelta(hours=3))
     def load(ds: str) -> None:
         # Пароль читается из Airflow Connection, а не из growth_config.json/

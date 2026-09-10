@@ -273,8 +273,21 @@ class TestLoadCommitMarker:
             "load_to_clickhouse", reason="нужен requirements-spark.txt"
         )
 
-    def _args(self):
-        return SimpleNamespace(load_date="2026-06-01")
+    def _args(self, force_reload=False):
+        return SimpleNamespace(load_date="2026-06-01", force_reload=force_reload)
+
+    def _storage(self, loader, monkeypatch, committed):
+        """Заглушка ClickHouse: отвечает на проверку маркера, помнит DROP."""
+        dropped = []
+
+        def execute(args, sql):
+            if sql.startswith("SELECT count()"):
+                return "3\n" if committed else "0\n"
+            dropped.append(sql)
+            return ""
+
+        monkeypatch.setattr(loader, "ch_execute", execute)
+        return dropped
 
     def test_day_with_a_marker_is_committed(self, loader, monkeypatch):
         monkeypatch.setattr(loader, "ch_execute", lambda args, sql: "3\n")
@@ -296,7 +309,13 @@ class TestLoadCommitMarker:
         assert "('2026-06-01', 'orders', 10)" in sent[0]
         assert "('2026-06-01', 'payments', 20)" in sent[0]
 
-    def test_reload_drops_every_partitioned_table(self, loader, monkeypatch):
+    def test_drop_removes_the_marker_first(self, loader, monkeypatch):
+        """Сначала маркер, потом данные.
+
+        В обратном порядке сбой посреди удаления оставил бы день
+        отмеченным как загруженный, но пустым — и следующий запуск
+        пропустил бы его.
+        """
         sent = []
         monkeypatch.setattr(
             loader, "ch_execute", lambda args, sql: sent.append(sql) or ""
@@ -304,10 +323,9 @@ class TestLoadCommitMarker:
 
         loader.drop_existing_partitions(self._args())
 
-        assert len(sent) == len(loader.PARTITIONED_TABLES)
         assert sent == [
             f"ALTER TABLE {table} DROP PARTITION '2026-06-01'"
-            for table in loader.PARTITIONED_TABLES
+            for table in [loader.COMMITS_TABLE, *loader.PARTITIONED_TABLES]
         ]
         # Прежняя версия писала «DROP PARTITION IF EXISTS», и этот тест
         # требовал именно её — на том основании, что за день с пустым
@@ -316,3 +334,27 @@ class TestLoadCommitMarker:
         # есть --force-reload не работал ни разу. Отсутствующую партицию
         # он и так пропускает молча.
         assert not any("IF EXISTS" in sql for sql in sent)
+
+    def test_committed_day_is_left_untouched(self, loader, monkeypatch):
+        dropped = self._storage(loader, monkeypatch, committed=True)
+
+        assert loader.prepare_load_date(self._args()) is False
+        assert dropped == []
+
+    def test_force_reload_clears_a_committed_day(self, loader, monkeypatch):
+        dropped = self._storage(loader, monkeypatch, committed=True)
+
+        assert loader.prepare_load_date(self._args(force_reload=True)) is True
+        assert len(dropped) == len(loader.PARTITIONED_TABLES) + 1
+
+    def test_unfinished_day_is_cleared_before_loading(self, loader, monkeypatch):
+        """День без маркера очищается и без --force-reload.
+
+        Иначе повтор после сбоя дописывал бы к уже записанным строкам:
+        quarantine_* и dq_metrics — обычный MergeTree, и доля брака за
+        этот день задвоилась бы.
+        """
+        dropped = self._storage(loader, monkeypatch, committed=False)
+
+        assert loader.prepare_load_date(self._args()) is True
+        assert len(dropped) == len(loader.PARTITIONED_TABLES) + 1
