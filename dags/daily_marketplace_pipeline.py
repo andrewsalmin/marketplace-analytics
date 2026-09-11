@@ -122,12 +122,32 @@ def _volume_for_day(day_index: int) -> tuple[int, int]:
 
 
 def _run(args: list[str], env: dict[str, str] | None = None) -> None:
-    subprocess.run(
+    """Запускает подпроцесс и построчно прокидывает его вывод в лог таска.
+
+    subprocess.run() без stdout/stderr наследует файловые дескрипторы
+    процесса воркера, а не перенаправленный sys.stdout самого таска
+    Airflow — весь вывод дочернего скрипта (баннер Spark, logger.info в
+    load_to_clickhouse.py и т.п.) уходил мимо лога задачи. Popen с
+    построчным logger.info решает это, не буферизуя вывод до конца
+    выполнения.
+    """
+    process = subprocess.Popen(
         args,
         cwd=REPO_ROOT,
-        check=True,
         env={**os.environ, **env} if env else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
     )
+
+    assert process.stdout is not None
+    for line in process.stdout:
+        logger.info(line.rstrip())
+
+    return_code = process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, args)
 
 
 def _alert_on_failure(context: dict) -> None:
