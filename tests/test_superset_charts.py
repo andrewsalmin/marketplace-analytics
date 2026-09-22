@@ -744,3 +744,84 @@ class TestPruneBackups:
         arf.prune_backups(tmp_path, keep=1)
 
         assert keep.exists(), "уборка бэкапов не должна трогать ничего больше"
+
+
+class TestHorizonFilters:
+    """Правка задаёт отсечку свежего хвоста целиком, а не дописывает ещё одну.
+
+    GMV и средний чек перевели с is_mature на is_payment_settled, но
+    скрипт умел только добавлять фильтры: на дашборде остались оба, и
+    графики обрывались за 34 дня до конца данных вместо двух.
+    """
+
+    TIME_RANGE = {
+        "expressionType": "SIMPLE",
+        "subject": "created_at",
+        "operator": "TEMPORAL_RANGE",
+        "comparator": "No filter",
+        "clause": "WHERE",
+    }
+
+    def _runner(self):
+        runner = arf.Runner.__new__(arf.Runner)
+        runner.datasets = {"orders_with_customer_dim": {"id": 15}}
+        return runner
+
+    def _chart(self, patch, filters):
+        return {
+            "slice_name": patch["slice_name"],
+            "description": patch["description"],
+            "form_data": {
+                "datasource": "15__table",
+                "adhoc_filters": [
+                    dict(self.TIME_RANGE),
+                    *(arf.sql_filter(e, s) for e, s in filters),
+                ],
+            },
+        }
+
+    @staticmethod
+    def _expressions(payload):
+        filters = json.loads(payload["params"])["adhoc_filters"]
+        return [f.get("sqlExpression") or f["operator"] for f in filters]
+
+    def test_replaced_horizon_is_removed(self):
+        patch = arf.chart_patches()["Изменение GMV"]
+        chart = self._chart(patch, [arf.MATURE_FILTER, arf.SETTLED_FILTER])
+
+        payload = self._runner()._build_chart_payload(chart, patch)
+
+        # TEMPORAL_RANGE обязан пережить правку: за него держится фильтр
+        # периода на дашборде.
+        assert self._expressions(payload) == [
+            "TEMPORAL_RANGE",
+            "is_payment_settled = 1",
+        ]
+
+    def test_second_run_changes_nothing(self):
+        patch = arf.chart_patches()["Изменение GMV"]
+        runner = self._runner()
+        first = runner._build_chart_payload(
+            self._chart(patch, [arf.MATURE_FILTER]), patch
+        )
+        chart = {**self._chart(patch, []), "form_data": json.loads(first["params"])}
+
+        assert runner._build_chart_payload(chart, patch) is None
+
+    def test_patch_without_filters_leaves_the_horizon_alone(self):
+        """Правка без `filters` о горизонте ничего не утверждает."""
+        patch = {"phase": "p0", "note": "", "set": {"y_axis_title": "Заказы"}}
+        chart = {
+            "slice_name": "Чарт",
+            "form_data": {"adhoc_filters": [arf.sql_filter(*arf.MATURE_FILTER)]},
+        }
+
+        payload = self._runner()._build_chart_payload(chart, patch)
+
+        assert self._expressions(payload) == ["is_mature = 1"]
+
+    def test_every_patch_declares_at_most_one_horizon(self):
+        horizons = {e for e, _ in arf.HORIZON_FILTERS}
+        for name, patch in arf.chart_patches().items():
+            declared = [e for e, _ in patch.get("filters", []) if e in horizons]
+            assert len(declared) <= 1, f"«{name}»: два горизонта сразу — {declared}"

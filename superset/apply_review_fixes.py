@@ -158,6 +158,14 @@ PUBLIC_REQUIRED_PERMISSIONS = [
 MATURE_FILTER = ("is_mature = 1", "is_mature")
 SETTLED_FILTER = ("is_payment_settled = 1", "is_payment_settled")
 
+# Горизонт у чарта один — тот, что нужен его вопросу, поэтому правка с
+# `filters` задаёт его целиком: горизонты из этого списка, которых она не
+# называет, снимаются. ensure_filter умеет только дописывать, и когда GMV
+# перевели с is_mature на is_payment_settled, старая отсечка осталась в
+# чарте рядом с новой — график обрывался за 34 дня до конца данных, а
+# описание обещало два.
+HORIZON_FILTERS = (MATURE_FILTER, SETTLED_FILTER)
+
 PAID = "paid_at IS NOT NULL"
 # «Чистый» — заказ, который дошёл до покупателя и остался у него:
 # ни отмены, ни возврата товара, ни возврата денег. Возврат товара
@@ -2101,6 +2109,12 @@ class Runner:
         form_data["adhoc_filters"] = drop_filters(
             form_data.get("adhoc_filters") or [], OBSOLETE_FILTERS
         )
+        if "filters" in patch:
+            declared = {expression for expression, _ in patch["filters"]}
+            form_data["adhoc_filters"] = drop_filters(
+                form_data["adhoc_filters"],
+                [e for e, _ in HORIZON_FILTERS if e not in declared],
+            )
         for expression, subject in patch.get("filters", []):
             form_data["adhoc_filters"] = ensure_filter(
                 form_data.get("adhoc_filters") or [], expression, subject
