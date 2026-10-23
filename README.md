@@ -1,5 +1,8 @@
 # Marketplace Analytics
 
+> [!WARNING]
+> **Пайплайн временно не работает** из-за проблем на платформе Yandex Cloud.
+
 [![CI](https://github.com/andrewsalmin/marketplace-analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/andrewsalmin/marketplace-analytics/actions/workflows/ci.yml)
 
 Аналитический пайплайн маркетплейса на синтетических данных: от ежедневной
